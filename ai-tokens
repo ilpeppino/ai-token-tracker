@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE="$HOME/.ai-token-tracker"
+PY="$BASE/.venv/bin/python"
+STREAMLIT="$BASE/.venv/bin/streamlit"
+
+case "${1:-dashboard}" in
+  sync)
+    "$PY" "$BASE/sync-usage.py"
+    ;;
+
+  dashboard)
+    "$PY" "$BASE/sync-usage.py"
+    "$STREAMLIT" run "$BASE/dashboard.py" --server.headless=false
+    ;;
+
+  export)
+    "$PY" "$BASE/sync-usage.py"
+    "$PY" "$BASE/export-usage.py"
+    ;;
+
+  stats)
+    "$BASE/token-stats.sh" "${2:-today}"
+    ;;
+
+  *)
+    echo "Usage:"
+    echo "  ai-tokens dashboard"
+    echo "  ai-tokens sync"
+    echo "  ai-tokens export"
+    echo "  ai-tokens stats today"
+    echo "  ai-tokens stats daily"
+    exit 1
+    ;;
+esac

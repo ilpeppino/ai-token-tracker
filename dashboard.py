@@ -1,0 +1,410 @@
+#!/usr/bin/env python3
+import sqlite3
+from pathlib import Path
+
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+DB_PATH = Path.home() / ".ai-token-tracker" / "usage.sqlite"
+
+st.set_page_config(
+    page_title="AI Token Usage Dashboard",
+    page_icon="📊",
+    layout="wide",
+)
+
+st.title("AI Token Usage Dashboard")
+
+if not DB_PATH.exists():
+    st.error(f"Database not found: {DB_PATH}")
+    st.stop()
+
+conn = sqlite3.connect(DB_PATH)
+
+df = pd.read_sql_query(
+    """
+    SELECT
+      tool,
+      session_id,
+      date,
+      timestamp,
+      project,
+      cwd,
+      model,
+      reasoning_effort,
+      input_tokens,
+      output_tokens,
+      cache_read_tokens,
+      cache_write_tokens,
+      main_total_tokens,
+      full_total_tokens,
+      reported_total_tokens,
+      cost_usd,
+      live
+    FROM usage_sessions
+    ORDER BY date ASC, timestamp ASC
+    """,
+    conn,
+)
+
+conn.close()
+
+if df.empty:
+    st.warning("No usage data found yet. Run sync-usage.py first.")
+    st.stop()
+
+df["date"] = pd.to_datetime(df["date"])
+
+
+
+st.sidebar.header("Budget / Forecast")
+
+monthly_claude_budget = st.sidebar.number_input(
+    "Claude monthly budget USD",
+    min_value=0.0,
+    value=100.0,
+    step=10.0,
+)
+
+monthly_full_token_target = st.sidebar.number_input(
+    "Monthly full-token target",
+    min_value=0,
+    value=1_200_000_000,
+    step=10_000_000,
+)
+
+
+st.sidebar.header("Filters")
+
+all_tools = sorted(df["tool"].dropna().unique().tolist())
+selected_tools = st.sidebar.multiselect(
+    "Tools",
+    all_tools,
+    default=all_tools,
+)
+
+all_projects = sorted(df["project"].dropna().unique().tolist())
+selected_projects = st.sidebar.multiselect(
+    "Projects",
+    all_projects,
+    default=all_projects,
+)
+
+min_date = df["date"].min().date()
+max_date = df["date"].max().date()
+
+selected_range = st.sidebar.date_input(
+    "Date range",
+    value=(min_date, max_date),
+    min_value=min_date,
+    max_value=max_date,
+)
+
+if isinstance(selected_range, tuple) and len(selected_range) == 2:
+    start_date, end_date = selected_range
+else:
+    start_date, end_date = min_date, max_date
+
+df = df[
+    (df["tool"].isin(selected_tools))
+    & (df["project"].isin(selected_projects))
+    & (df["date"].dt.date >= start_date)
+    & (df["date"].dt.date <= end_date)
+].copy()
+
+if df.empty:
+    st.warning("No data matches the selected filters.")
+    st.stop()
+
+
+daily = (
+    df.groupby(["date", "tool"], as_index=False)
+    .agg(
+        sessions=("session_id", "count"),
+        main_total_tokens=("main_total_tokens", "sum"),
+        full_total_tokens=("full_total_tokens", "sum"),
+        cost_usd=("cost_usd", "sum"),
+    )
+)
+
+combined_daily = (
+    df.groupby("date", as_index=False)
+    .agg(
+        sessions=("session_id", "count"),
+        main_total_tokens=("main_total_tokens", "sum"),
+        full_total_tokens=("full_total_tokens", "sum"),
+        cost_usd=("cost_usd", "sum"),
+    )
+)
+
+combined_daily = combined_daily.sort_values("date")
+combined_daily["full_tokens_7d_avg"] = combined_daily["full_total_tokens"].rolling(7, min_periods=1).mean()
+combined_daily["main_tokens_7d_avg"] = combined_daily["main_total_tokens"].rolling(7, min_periods=1).mean()
+
+today = pd.Timestamp.today().normalize()
+today_df = df[df["date"] == today]
+
+today_full = int(today_df["full_total_tokens"].sum()) if not today_df.empty else 0
+today_main = int(today_df["main_total_tokens"].sum()) if not today_df.empty else 0
+today_cost = float(today_df["cost_usd"].sum()) if not today_df.empty else 0.0
+today_sessions = int(today_df["session_id"].count()) if not today_df.empty else 0
+
+last_7 = combined_daily[combined_daily["date"] >= today - pd.Timedelta(days=6)]
+avg_7_full = int(last_7["full_total_tokens"].mean()) if not last_7.empty else 0
+
+month_df = combined_daily[
+    (combined_daily["date"].dt.year == today.year)
+    & (combined_daily["date"].dt.month == today.month)
+]
+month_full = int(month_df["full_total_tokens"].sum()) if not month_df.empty else 0
+month_cost = float(month_df["cost_usd"].sum()) if not month_df.empty else 0.0
+
+days_in_month = today.days_in_month
+day_of_month = today.day
+
+projected_month_full = int((month_full / day_of_month) * days_in_month) if day_of_month else 0
+projected_month_cost = float((month_cost / day_of_month) * days_in_month) if day_of_month else 0.0
+
+highest_day = int(combined_daily["full_total_tokens"].max()) if not combined_daily.empty else 0
+today_vs_7d = (today_full / avg_7_full) if avg_7_full else 0
+
+col1, col2, col3, col4, col5 = st.columns(5)
+col1.metric("Today full tokens", f"{today_full:,}")
+col2.metric("7-day avg full", f"{avg_7_full:,}")
+col3.metric("Month-to-date full", f"{month_full:,}")
+col4.metric("Projected month full", f"{projected_month_full:,}")
+col5.metric("Projected Claude cost", f"${projected_month_cost:,.2f}")
+
+col6, col7, col8, col9, col10 = st.columns(5)
+col6.metric("Today main tokens", f"{today_main:,}")
+col7.metric("Today sessions", f"{today_sessions:,}")
+col8.metric("Highest day full", f"{highest_day:,}")
+col9.metric("Today vs 7d avg", f"{today_vs_7d:.2f}×")
+col10.metric("Month cost", f"${month_cost:,.2f}")
+
+if monthly_claude_budget > 0 and projected_month_cost > monthly_claude_budget:
+    st.warning(
+        f"Projected Claude cost is ${projected_month_cost:,.2f}, "
+        f"above your ${monthly_claude_budget:,.2f} monthly budget."
+    )
+
+if monthly_full_token_target > 0 and projected_month_full > monthly_full_token_target:
+    st.warning(
+        f"Projected full-token usage is {projected_month_full:,}, "
+        f"above your {monthly_full_token_target:,} monthly target."
+    )
+
+if today_vs_7d >= 1.5:
+    st.info(f"Today is {today_vs_7d:.2f}× above your 7-day average.")
+
+st.divider()
+
+st.subheader("Daily full token usage by tool")
+fig = px.line(
+    daily,
+    x="date",
+    y="full_total_tokens",
+    color="tool",
+    markers=True,
+    labels={
+        "date": "Date",
+        "full_total_tokens": "Full tokens",
+        "tool": "Tool",
+    },
+)
+st.plotly_chart(fig, width="stretch")
+
+st.subheader("Combined daily usage with 7-day average")
+
+fig2 = px.bar(
+    combined_daily,
+    x="date",
+    y="full_total_tokens",
+    labels={
+        "date": "Date",
+        "full_total_tokens": "Full tokens",
+    },
+)
+
+fig2.add_scatter(
+    x=combined_daily["date"],
+    y=combined_daily["full_tokens_7d_avg"],
+    mode="lines+markers",
+    name="7-day avg full tokens",
+)
+
+st.plotly_chart(fig2, width="stretch")
+
+st.subheader("Claude estimated cost")
+cost_daily = combined_daily[combined_daily["cost_usd"] > 0]
+if cost_daily.empty:
+    st.info("No cost data yet.")
+else:
+    fig3 = px.line(
+        cost_daily,
+        x="date",
+        y="cost_usd",
+        markers=True,
+        labels={
+            "date": "Date",
+            "cost_usd": "Cost USD",
+        },
+    )
+    st.plotly_chart(fig3, width="stretch")
+
+st.subheader("Project breakdown")
+project_daily = (
+    df.groupby(["project", "tool"], as_index=False)
+    .agg(full_total_tokens=("full_total_tokens", "sum"))
+    .sort_values("full_total_tokens", ascending=False)
+)
+fig4 = px.bar(
+    project_daily,
+    x="project",
+    y="full_total_tokens",
+    color="tool",
+    labels={
+        "project": "Project",
+        "full_total_tokens": "Full tokens",
+        "tool": "Tool",
+    },
+)
+st.plotly_chart(fig4, width="stretch")
+
+st.subheader("Sessions")
+display_df = df.sort_values("timestamp", ascending=False).copy()
+display_df["date"] = display_df["date"].dt.strftime("%Y-%m-%d")
+display_df["cost_usd"] = display_df["cost_usd"].map(lambda x: f"${x:.4f}")
+display_df = display_df[
+    [
+        "date",
+        "tool",
+        "project",
+        "model",
+        "reasoning_effort",
+        "session_id",
+        "main_total_tokens",
+        "full_total_tokens",
+        "cost_usd",
+        "live",
+    ]
+]
+
+st.dataframe(display_df, width="stretch", hide_index=True)
+
+st.caption(
+    "MAIN tokens = Claude input + output; Codex reported total. "
+    "FULL tokens = Claude input + output + cache read + cache write; Codex reported total."
+)
+
+
+st.subheader("Month-to-date by tool")
+
+month_tool = df[
+    (df["date"].dt.year == today.year)
+    & (df["date"].dt.month == today.month)
+].groupby("tool", as_index=False).agg(
+    sessions=("session_id", "count"),
+    main_total_tokens=("main_total_tokens", "sum"),
+    full_total_tokens=("full_total_tokens", "sum"),
+    cost_usd=("cost_usd", "sum"),
+)
+
+if month_tool.empty:
+    st.info("No month-to-date data for the selected filters.")
+else:
+    fig5 = px.bar(
+        month_tool,
+        x="tool",
+        y="full_total_tokens",
+        labels={
+            "tool": "Tool",
+            "full_total_tokens": "Month-to-date full tokens",
+        },
+    )
+    st.plotly_chart(fig5, width="stretch")
+
+    st.dataframe(month_tool, width="stretch", hide_index=True)
+
+st.subheader("Top sessions by full tokens")
+
+top_sessions = df.sort_values("full_total_tokens", ascending=False).head(20).copy()
+top_sessions["date"] = top_sessions["date"].dt.strftime("%Y-%m-%d")
+top_sessions["cost_usd"] = top_sessions["cost_usd"].map(lambda x: f"${x:.4f}")
+
+st.dataframe(
+    top_sessions[
+        [
+            "date",
+            "tool",
+            "project",
+            "model",
+            "session_id",
+            "main_total_tokens",
+            "full_total_tokens",
+            "cost_usd",
+        ]
+    ],
+    width="stretch",
+    hide_index=True,
+)
+
+
+st.subheader("Monthly projection")
+
+projection_df = pd.DataFrame(
+    [
+        {
+            "metric": "Month-to-date full tokens",
+            "value": month_full,
+        },
+        {
+            "metric": "Projected month-end full tokens",
+            "value": projected_month_full,
+        },
+        {
+            "metric": "Monthly full-token target",
+            "value": monthly_full_token_target,
+        },
+    ]
+)
+
+fig6 = px.bar(
+    projection_df,
+    x="metric",
+    y="value",
+    labels={
+        "metric": "Metric",
+        "value": "Full tokens",
+    },
+)
+st.plotly_chart(fig6, width="stretch")
+
+cost_projection_df = pd.DataFrame(
+    [
+        {
+            "metric": "Month-to-date Claude cost",
+            "value": month_cost,
+        },
+        {
+            "metric": "Projected month-end Claude cost",
+            "value": projected_month_cost,
+        },
+        {
+            "metric": "Claude monthly budget",
+            "value": monthly_claude_budget,
+        },
+    ]
+)
+
+fig7 = px.bar(
+    cost_projection_df,
+    x="metric",
+    y="value",
+    labels={
+        "metric": "Metric",
+        "value": "USD",
+    },
+)
+st.plotly_chart(fig7, width="stretch")
