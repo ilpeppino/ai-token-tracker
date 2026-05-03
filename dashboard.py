@@ -82,6 +82,10 @@ if quota_forecast_view_exists:
           avg_toktok_per_hour_7d,
           estimated_hours_to_5h_limit,
           estimated_hours_to_weekly_limit,
+          actual_hours_until_5h_reset,
+          actual_hours_until_weekly_reset,
+          five_hour_reset_status,
+          weekly_reset_status,
           five_hour_risk,
           weekly_risk
         FROM quota_forecast
@@ -307,8 +311,10 @@ else:
         five_hour_used = row["five_hour_used_pct"]
         weekly_used = row["weekly_used_pct"]
 
-        hrs_5h = row["estimated_hours_to_5h_limit"]
-        hrs_week = row["estimated_hours_to_weekly_limit"]
+        hrs_5h_limit = row["estimated_hours_to_5h_limit"]
+        hrs_week_limit = row["estimated_hours_to_weekly_limit"]
+        hrs_5h_reset = row["actual_hours_until_5h_reset"]
+        hrs_week_reset = row["actual_hours_until_weekly_reset"]
 
         f1.metric(
             "5h used",
@@ -319,12 +325,30 @@ else:
             "n/a" if pd.isna(weekly_used) else f"{weekly_used:.0f}%",
         )
         f3.metric(
-            "Estimated hours to 5h limit",
-            "n/a" if pd.isna(hrs_5h) else f"{hrs_5h:.1f}h",
+            "Est. time to 5h limit",
+            "n/a" if pd.isna(hrs_5h_limit) else f"{hrs_5h_limit:.1f}h",
         )
         f4.metric(
-            "Estimated hours to weekly limit",
-            "n/a" if pd.isna(hrs_week) else f"{hrs_week:.1f}h",
+            "Est. time to weekly limit",
+            "n/a" if pd.isna(hrs_week_limit) else f"{hrs_week_limit:.1f}h",
+        )
+
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric(
+            "Actual 5h reset countdown",
+            "n/a" if pd.isna(hrs_5h_reset) else f"{hrs_5h_reset:.1f}h",
+        )
+        r2.metric(
+            "Actual weekly reset countdown",
+            "n/a" if pd.isna(hrs_week_reset) else f"{hrs_week_reset:.1f}h",
+        )
+        r3.metric(
+            "5h reset status",
+            str(row.get("five_hour_reset_status", "unknown")),
+        )
+        r4.metric(
+            "Weekly reset status",
+            str(row.get("weekly_reset_status", "unknown")),
         )
 
         risk_5h = row["five_hour_risk"]
@@ -337,13 +361,24 @@ else:
         elif risk_5h == "insufficient_data" or risk_week == "insufficient_data":
             st.info(f"{provider.capitalize()} forecast needs more calibration data.")
 
+        if not pd.isna(hrs_week_limit) and not pd.isna(hrs_week_reset):
+            if hrs_week_limit < hrs_week_reset:
+                st.warning(
+                    f"{provider.capitalize()} may hit the weekly limit in ~{hrs_week_limit:.1f}h, "
+                    f"before the reset in ~{hrs_week_reset:.1f}h."
+                )
+            else:
+                st.success(
+                    f"{provider.capitalize()} weekly reset is expected before the projected limit."
+                )
+
     forecast_table = quota_forecast_df.copy()
     forecast_table["observed_at"] = forecast_table["observed_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
     st.dataframe(forecast_table, width="stretch", hide_index=True)
 
     st.caption(
-        "Forecast uses empirical Toktok calibration. 5h burn rate is based on the last 5 local hours. "
-        "Weekly burn rate is based on the last 7 local days. This is not an official vendor quota API."
+        "Forecast uses empirical Toktok calibration. Time-to-limit is estimated from local burn rate. "
+        "Time-to-reset comes from vendor page reset text when available. This is not an official vendor quota API."
     )
 
 

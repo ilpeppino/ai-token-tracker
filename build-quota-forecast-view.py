@@ -51,7 +51,21 @@ def main() -> None:
             estimated_5h_capacity_toktok,
             estimated_weekly_capacity_toktok,
             five_hour_estimate_status,
-            weekly_estimate_status
+            weekly_estimate_status,
+            exact_five_hour_window_end_at,
+            exact_weekly_window_end_at,
+
+            CASE
+              WHEN exact_five_hour_window_end_at IS NOT NULL
+              THEN (julianday(exact_five_hour_window_end_at) - julianday(observed_at)) * 24.0
+              ELSE NULL
+            END AS hours_until_5h_reset,
+
+            CASE
+              WHEN exact_weekly_window_end_at IS NOT NULL
+              THEN (julianday(exact_weekly_window_end_at) - julianday(observed_at)) * 24.0
+              ELSE NULL
+            END AS hours_until_weekly_reset
           FROM latest
         ),
         rates AS (
@@ -68,6 +82,10 @@ def main() -> None:
             estimated_weekly_capacity_toktok,
             five_hour_estimate_status,
             weekly_estimate_status,
+            exact_five_hour_window_end_at,
+            exact_weekly_window_end_at,
+            hours_until_5h_reset,
+            hours_until_weekly_reset,
 
             CASE
               WHEN toktok_last_5h > 0
@@ -101,6 +119,11 @@ def main() -> None:
           avg_toktok_per_hour_5h,
           avg_toktok_per_hour_7d,
 
+          exact_five_hour_window_end_at,
+          exact_weekly_window_end_at,
+          hours_until_5h_reset,
+          hours_until_weekly_reset,
+
           CASE
             WHEN five_hour_estimate_status = 'usable'
              AND avg_toktok_per_hour_5h > 0
@@ -118,6 +141,32 @@ def main() -> None:
               ((estimated_weekly_capacity_toktok * (weekly_remaining_pct / 100.0)) / avg_toktok_per_hour_7d)
             ELSE NULL
           END AS estimated_hours_to_weekly_limit,
+
+          CASE
+            WHEN hours_until_5h_reset IS NOT NULL
+             AND hours_until_5h_reset >= 0
+            THEN hours_until_5h_reset
+            ELSE NULL
+          END AS actual_hours_until_5h_reset,
+
+          CASE
+            WHEN hours_until_weekly_reset IS NOT NULL
+             AND hours_until_weekly_reset >= 0
+            THEN hours_until_weekly_reset
+            ELSE NULL
+          END AS actual_hours_until_weekly_reset,
+
+          CASE
+            WHEN hours_until_5h_reset IS NULL THEN 'unknown_reset'
+            WHEN hours_until_5h_reset < 0 THEN 'reset_time_passed'
+            ELSE 'known_reset'
+          END AS five_hour_reset_status,
+
+          CASE
+            WHEN hours_until_weekly_reset IS NULL THEN 'unknown_reset'
+            WHEN hours_until_weekly_reset < 0 THEN 'reset_time_passed'
+            ELSE 'known_reset'
+          END AS weekly_reset_status,
 
           CASE
             WHEN five_hour_estimate_status != 'usable' THEN 'insufficient_data'
@@ -149,15 +198,31 @@ def main() -> None:
           weekly_used_pct,
           printf('%,d', estimated_5h_capacity_toktok),
           printf('%,d', estimated_weekly_capacity_toktok),
-          printf('%.2f', estimated_hours_to_5h_limit),
-          printf('%.2f', estimated_hours_to_weekly_limit),
+          CASE
+            WHEN estimated_hours_to_5h_limit IS NULL THEN 'n/a'
+            ELSE printf('%.2f', estimated_hours_to_5h_limit)
+          END,
+          CASE
+            WHEN estimated_hours_to_weekly_limit IS NULL THEN 'n/a'
+            ELSE printf('%.2f', estimated_hours_to_weekly_limit)
+          END,
+          CASE
+            WHEN actual_hours_until_5h_reset IS NULL THEN 'n/a'
+            ELSE printf('%.2f', actual_hours_until_5h_reset)
+          END,
+          CASE
+            WHEN actual_hours_until_weekly_reset IS NULL THEN 'n/a'
+            ELSE printf('%.2f', actual_hours_until_weekly_reset)
+          END,
           five_hour_risk,
-          weekly_risk
+          weekly_risk,
+          five_hour_reset_status,
+          weekly_reset_status
         FROM quota_forecast
         ORDER BY provider
         """).fetchall()
 
-        print("provider\tobserved_at\t5h_used\tweekly_used\test_5h_cap\test_week_cap\thrs_to_5h\thrs_to_week\t5h_risk\tweek_risk")
+        print("provider\tobserved_at\t5h_used\tweekly_used\test_5h_cap\test_week_cap\thrs_to_5h_limit\thrs_to_week_limit\thrs_to_5h_reset\thrs_to_week_reset\t5h_risk\tweek_risk\t5h_reset\tweek_reset")
         for row in rows:
             print("\t".join("" if value is None else str(value) for value in row))
 

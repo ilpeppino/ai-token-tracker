@@ -209,12 +209,11 @@ def infer_reset_windows(provider: Provider, text: str, observed_at: datetime) ->
     if provider == "codex":
         codex_reset = extract_codex_absolute_reset(text, observed_at)
         if codex_reset:
-            # Current Codex page text appears to expose the plan/week reset. Use it
-            # as weekly reset. Also use it as 5h reset only when the 5h limit text
-            # is the active visible reset source; otherwise leave 5h as unknown.
+            # The current Codex analytics page exposes the weekly/plan reset timestamp.
+            # It does not expose a separate 5-hour reset timestamp in the observed dump.
+            # Keep 5h reset unknown unless a future page version shows a clearly scoped
+            # 5-hour reset value.
             weekly_reset_at = codex_reset
-            if re.search(r"5 hour usage limit.*?resets", text, re.IGNORECASE | re.DOTALL):
-                five_hour_reset_at = codex_reset
 
     elif provider == "claude":
         weekly_reset_at = extract_claude_weekly_relative_reset(text, observed_at)
