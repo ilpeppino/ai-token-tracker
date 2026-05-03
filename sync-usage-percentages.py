@@ -14,6 +14,7 @@ Important:
 - They are best-effort and not official API values.
 - Codex currently reports quota as "remaining" on the page, so the script normalizes it to "used".
 - Claude currently reports quota as "used" on the page.
+- Reset/window timestamps are parsed when visible and are used by calibration views when available.
 """
 
 from __future__ import annotations
@@ -22,16 +23,27 @@ import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DB_PATH = PROJECT_DIR / "usage.sqlite"
 DUMP_DIR = PROJECT_DIR / "usage-dumps"
 
+LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
+
 Provider = Literal["codex", "claude"]
 RawMode = Literal["used", "remaining"]
+
+
+@dataclass(frozen=True)
+class ResetWindowInfo:
+    five_hour_reset_at: str | None = None
+    weekly_reset_at: str | None = None
+    five_hour_window_start_at: str | None = None
+    weekly_window_start_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -43,7 +55,11 @@ class ParsedUsageSnapshot:
     raw_weekly_pct: float | None
     raw_mode: RawMode
     reset_text: str
-    parser_version: str = "2026-05-03-v1"
+    five_hour_reset_at: str | None = None
+    weekly_reset_at: str | None = None
+    five_hour_window_start_at: str | None = None
+    weekly_window_start_at: str | None = None
+    parser_version: str = "2026-05-03-v2"
 
 
 def pct_after(label: str, text: str, mode: str) -> float | None:
@@ -80,9 +96,147 @@ def extract_reset_text(text: str) -> str:
     return " || ".join(candidates[:3])
 
 
-def parse_codex(text: str) -> ParsedUsageSnapshot:
+def to_utc_iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=LOCAL_TZ)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def parse_absolute_local_datetime(value: str, observed_at: datetime) -> datetime | None:
+    """Parse page text like `May 5, 2026 12:27 PM` in local timezone."""
+    cleaned = " ".join(value.strip().split())
+
+    formats = [
+        "%B %d, %Y %I:%M %p",
+        "%b %d, %Y %I:%M %p",
+        "%B %d %Y %I:%M %p",
+        "%b %d %Y %I:%M %p",
+    ]
+
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(cleaned, fmt)
+            return parsed.replace(tzinfo=LOCAL_TZ)
+        except ValueError:
+            continue
+
+    # Some pages may omit the year. Assume the observed year and adjust if the
+    # parsed date is implausibly far in the past.
+    yearless_formats = ["%B %d %I:%M %p", "%b %d %I:%M %p"]
+    for fmt in yearless_formats:
+        try:
+            parsed = datetime.strptime(cleaned, fmt).replace(year=observed_at.year)
+            parsed = parsed.replace(tzinfo=LOCAL_TZ)
+            if parsed < observed_at.astimezone(LOCAL_TZ) - timedelta(days=30):
+                parsed = parsed.replace(year=parsed.year + 1)
+            return parsed
+        except ValueError:
+            continue
+
+    return None
+
+
+def parse_relative_duration(text: str) -> timedelta | None:
+    """Parse relative reset text like `9 hr 14 min` or `2 hours 5 minutes`."""
+    low = text.lower()
+
+    days = hours = minutes = 0
+
+    day_match = re.search(r"(\d+)\s*(?:d|day|days)\b", low)
+    hour_match = re.search(r"(\d+)\s*(?:h|hr|hrs|hour|hours)\b", low)
+    minute_match = re.search(r"(\d+)\s*(?:m|min|mins|minute|minutes)\b", low)
+
+    if day_match:
+        days = int(day_match.group(1))
+    if hour_match:
+        hours = int(hour_match.group(1))
+    if minute_match:
+        minutes = int(minute_match.group(1))
+
+    if days == 0 and hours == 0 and minutes == 0:
+        return None
+
+    return timedelta(days=days, hours=hours, minutes=minutes)
+
+
+def extract_codex_absolute_reset(text: str, observed_at: datetime) -> datetime | None:
+    """Extract Codex absolute reset time from page text when visible."""
+    patterns = [
+        r"Your limit resets on\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s+[AP]M)",
+        r"Resets\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s+[AP]M)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        parsed = parse_absolute_local_datetime(match.group(1), observed_at)
+        if parsed:
+            return parsed
+
+    return None
+
+
+def extract_claude_weekly_relative_reset(text: str, observed_at: datetime) -> datetime | None:
+    """Extract Claude weekly reset from relative text like `Resets in 9 hr 14 min`."""
+    match = re.search(r"Weekly limits.*?Resets in\s+([^\n]+)", text, re.IGNORECASE | re.DOTALL)
+    if not match:
+        match = re.search(r"Resets in\s+([^\n]+)", text, re.IGNORECASE)
+
+    if not match:
+        return None
+
+    # Stop at the next likely page label if the text came from body.innerText.
+    raw = match.group(1).strip()
+    raw = re.split(r"\n|\|", raw)[0].strip()
+
+    duration = parse_relative_duration(raw)
+    if duration is None:
+        return None
+
+    return observed_at + duration
+
+
+def infer_reset_windows(provider: Provider, text: str, observed_at: datetime) -> ResetWindowInfo:
+    """Infer reset/window timestamps from page text when possible.
+
+    Codex currently exposes an absolute reset timestamp in the analytics page.
+    Claude currently exposes a relative weekly reset such as `Resets in 9 hr 14 min`.
+    """
+    five_hour_reset_at: datetime | None = None
+    weekly_reset_at: datetime | None = None
+
+    if provider == "codex":
+        codex_reset = extract_codex_absolute_reset(text, observed_at)
+        if codex_reset:
+            # Current Codex page text appears to expose the plan/week reset. Use it
+            # as weekly reset. Also use it as 5h reset only when the 5h limit text
+            # is the active visible reset source; otherwise leave 5h as unknown.
+            weekly_reset_at = codex_reset
+            if re.search(r"5 hour usage limit.*?resets", text, re.IGNORECASE | re.DOTALL):
+                five_hour_reset_at = codex_reset
+
+    elif provider == "claude":
+        weekly_reset_at = extract_claude_weekly_relative_reset(text, observed_at)
+        # Claude sample says the current session starts when a message is sent but
+        # does not expose a concrete 5h reset timestamp. Keep it unknown for now.
+
+    return ResetWindowInfo(
+        five_hour_reset_at=to_utc_iso(five_hour_reset_at) if five_hour_reset_at else None,
+        weekly_reset_at=to_utc_iso(weekly_reset_at) if weekly_reset_at else None,
+        five_hour_window_start_at=(
+            to_utc_iso(five_hour_reset_at - timedelta(hours=5)) if five_hour_reset_at else None
+        ),
+        weekly_window_start_at=(
+            to_utc_iso(weekly_reset_at - timedelta(days=7)) if weekly_reset_at else None
+        ),
+    )
+
+
+def parse_codex(text: str, observed_at: datetime) -> ParsedUsageSnapshot:
     five_remaining = pct_after("5 hour usage limit", text, "remaining")
     weekly_remaining = pct_after("Weekly usage limit", text, "remaining")
+    reset_info = infer_reset_windows("codex", text, observed_at)
 
     return ParsedUsageSnapshot(
         provider="codex",
@@ -92,12 +246,17 @@ def parse_codex(text: str) -> ParsedUsageSnapshot:
         raw_weekly_pct=weekly_remaining,
         raw_mode="remaining",
         reset_text=extract_reset_text(text),
+        five_hour_reset_at=reset_info.five_hour_reset_at,
+        weekly_reset_at=reset_info.weekly_reset_at,
+        five_hour_window_start_at=reset_info.five_hour_window_start_at,
+        weekly_window_start_at=reset_info.weekly_window_start_at,
     )
 
 
-def parse_claude(text: str) -> ParsedUsageSnapshot:
+def parse_claude(text: str, observed_at: datetime) -> ParsedUsageSnapshot:
     five_used = pct_after("Current session", text, "used")
     weekly_used = pct_after("Weekly limits", text, "used")
+    reset_info = infer_reset_windows("claude", text, observed_at)
 
     return ParsedUsageSnapshot(
         provider="claude",
@@ -107,29 +266,33 @@ def parse_claude(text: str) -> ParsedUsageSnapshot:
         raw_weekly_pct=weekly_used,
         raw_mode="used",
         reset_text=extract_reset_text(text),
+        five_hour_reset_at=reset_info.five_hour_reset_at,
+        weekly_reset_at=reset_info.weekly_reset_at,
+        five_hour_window_start_at=reset_info.five_hour_window_start_at,
+        weekly_window_start_at=reset_info.weekly_window_start_at,
     )
 
 
 def detect_provider(text: str) -> Provider | None:
     low = text.lower()
 
-    if "codex analytics" in low or "5 hour usage limit" in low and "weekly usage limit" in low:
+    if "codex analytics" in low or ("5 hour usage limit" in low and "weekly usage limit" in low):
         return "codex"
 
-    if "plan usage limits" in low or "current session" in low and "weekly limits" in low:
+    if "plan usage limits" in low or ("current session" in low and "weekly limits" in low):
         return "claude"
 
     return None
 
 
-def parse_dump(text: str) -> ParsedUsageSnapshot | None:
+def parse_dump(text: str, observed_at: datetime) -> ParsedUsageSnapshot | None:
     provider = detect_provider(text)
 
     if provider == "codex":
-        return parse_codex(text)
+        return parse_codex(text, observed_at)
 
     if provider == "claude":
-        return parse_claude(text)
+        return parse_claude(text, observed_at)
 
     return None
 
@@ -162,14 +325,19 @@ def ensure_db(conn: sqlite3.Connection) -> None:
         for row in conn.execute("PRAGMA table_info(usage_percentage_snapshots)").fetchall()
     }
 
-    if "reset_text" not in existing_columns:
-        conn.execute("ALTER TABLE usage_percentage_snapshots ADD COLUMN reset_text TEXT")
+    migrations = {
+        "reset_text": "ALTER TABLE usage_percentage_snapshots ADD COLUMN reset_text TEXT",
+        "raw_text_hash": "ALTER TABLE usage_percentage_snapshots ADD COLUMN raw_text_hash TEXT",
+        "parser_version": "ALTER TABLE usage_percentage_snapshots ADD COLUMN parser_version TEXT",
+        "five_hour_reset_at": "ALTER TABLE usage_percentage_snapshots ADD COLUMN five_hour_reset_at TEXT",
+        "weekly_reset_at": "ALTER TABLE usage_percentage_snapshots ADD COLUMN weekly_reset_at TEXT",
+        "five_hour_window_start_at": "ALTER TABLE usage_percentage_snapshots ADD COLUMN five_hour_window_start_at TEXT",
+        "weekly_window_start_at": "ALTER TABLE usage_percentage_snapshots ADD COLUMN weekly_window_start_at TEXT",
+    }
 
-    if "raw_text_hash" not in existing_columns:
-        conn.execute("ALTER TABLE usage_percentage_snapshots ADD COLUMN raw_text_hash TEXT")
-
-    if "parser_version" not in existing_columns:
-        conn.execute("ALTER TABLE usage_percentage_snapshots ADD COLUMN parser_version TEXT")
+    for column, statement in migrations.items():
+        if column not in existing_columns:
+            conn.execute(statement)
 
     conn.execute(
         """
@@ -234,10 +402,14 @@ def insert_snapshot(
           dump_file,
           raw_text,
           reset_text,
+          five_hour_reset_at,
+          weekly_reset_at,
+          five_hour_window_start_at,
+          weekly_window_start_at,
           raw_text_hash,
           parser_version
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             parsed.provider,
@@ -251,6 +423,10 @@ def insert_snapshot(
             str(dump_file),
             raw_text,
             parsed.reset_text,
+            parsed.five_hour_reset_at,
+            parsed.weekly_reset_at,
+            parsed.five_hour_window_start_at,
+            parsed.weekly_window_start_at,
             raw_text_hash,
             parsed.parser_version,
         ),
@@ -271,7 +447,8 @@ def main() -> None:
     if not dump_files:
         raise SystemExit(f"No dump files found in: {DUMP_DIR}")
 
-    observed_at = datetime.now(timezone.utc).isoformat()
+    observed_dt = datetime.now(timezone.utc)
+    observed_at = observed_dt.isoformat()
 
     conn = sqlite3.connect(DB_PATH)
 
@@ -284,7 +461,7 @@ def main() -> None:
 
         for dump_file in dump_files:
             text = dump_file.read_text(errors="replace")
-            parsed = parse_dump(text)
+            parsed = parse_dump(text, observed_dt)
 
             if parsed is None:
                 skipped_unrecognized += 1
@@ -298,6 +475,7 @@ def main() -> None:
                     f"{parsed.provider}: "
                     f"5h={parsed.five_hour_used_pct}% "
                     f"weekly={parsed.weekly_used_pct}% "
+                    f"weekly_reset={parsed.weekly_reset_at or 'unknown'} "
                     f"mode={parsed.raw_mode} "
                     f"from {dump_file.name}"
                 )

@@ -49,8 +49,38 @@ def ensure_required_tables(conn: sqlite3.Connection) -> None:
         )
 
 
+def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {
+        row[1]
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+
+
 def create_calibration_view(conn: sqlite3.Connection) -> None:
     conn.execute(f"DROP VIEW IF EXISTS {VIEW_NAME}")
+
+    snapshot_columns = table_columns(conn, "usage_percentage_snapshots")
+
+    five_hour_reset_expr = (
+        "five_hour_reset_at"
+        if "five_hour_reset_at" in snapshot_columns
+        else "NULL AS five_hour_reset_at"
+    )
+    weekly_reset_expr = (
+        "weekly_reset_at"
+        if "weekly_reset_at" in snapshot_columns
+        else "NULL AS weekly_reset_at"
+    )
+    five_hour_window_start_expr = (
+        "five_hour_window_start_at"
+        if "five_hour_window_start_at" in snapshot_columns
+        else "NULL AS five_hour_window_start_at"
+    )
+    weekly_window_start_expr = (
+        "weekly_window_start_at"
+        if "weekly_window_start_at" in snapshot_columns
+        else "NULL AS weekly_window_start_at"
+    )
 
     conn.execute(
         f"""
@@ -67,6 +97,10 @@ def create_calibration_view(conn: sqlite3.Connection) -> None:
             raw_weekly_pct,
             raw_mode,
             reset_text,
+            {five_hour_reset_expr},
+            {weekly_reset_expr},
+            {five_hour_window_start_expr},
+            {weekly_window_start_expr},
             source,
             dump_file,
             parser_version
@@ -84,14 +118,46 @@ def create_calibration_view(conn: sqlite3.Connection) -> None:
             s.raw_weekly_pct,
             s.raw_mode,
             s.reset_text,
+            s.five_hour_reset_at,
+            s.weekly_reset_at,
+            CASE
+              WHEN s.five_hour_window_start_at IS NOT NULL THEN s.five_hour_window_start_at
+              WHEN s.five_hour_reset_at IS NOT NULL THEN datetime(s.five_hour_reset_at, '-5 hours')
+              ELSE NULL
+            END AS exact_five_hour_window_start_at,
+            s.five_hour_reset_at AS exact_five_hour_window_end_at,
+            CASE
+              WHEN s.weekly_window_start_at IS NOT NULL THEN s.weekly_window_start_at
+              WHEN s.weekly_reset_at IS NOT NULL THEN datetime(s.weekly_reset_at, '-7 days')
+              ELSE NULL
+            END AS exact_weekly_window_start_at,
+            s.weekly_reset_at AS exact_weekly_window_end_at,
             s.source,
             s.dump_file,
             s.parser_version,
 
             COALESCE(SUM(
               CASE
-                WHEN datetime(u.timestamp) >= datetime(s.observed_at, '-5 hours')
-                 AND datetime(u.timestamp) <= datetime(s.observed_at)
+                WHEN (
+                  CASE
+                    WHEN s.five_hour_window_start_at IS NOT NULL THEN s.five_hour_window_start_at
+                    WHEN s.five_hour_reset_at IS NOT NULL THEN datetime(s.five_hour_reset_at, '-5 hours')
+                    ELSE datetime(s.observed_at, '-5 hours')
+                  END
+                ) IS NOT NULL
+                 AND datetime(u.timestamp) >= datetime(
+                  CASE
+                    WHEN s.five_hour_window_start_at IS NOT NULL THEN s.five_hour_window_start_at
+                    WHEN s.five_hour_reset_at IS NOT NULL THEN datetime(s.five_hour_reset_at, '-5 hours')
+                    ELSE datetime(s.observed_at, '-5 hours')
+                  END
+                 )
+                 AND datetime(u.timestamp) <= datetime(
+                  CASE
+                    WHEN s.five_hour_reset_at IS NOT NULL THEN s.five_hour_reset_at
+                    ELSE s.observed_at
+                  END
+                 )
                 THEN u.full_total_tokens
                 ELSE 0
               END
@@ -99,8 +165,26 @@ def create_calibration_view(conn: sqlite3.Connection) -> None:
 
             COALESCE(SUM(
               CASE
-                WHEN datetime(u.timestamp) >= datetime(s.observed_at, '-7 days')
-                 AND datetime(u.timestamp) <= datetime(s.observed_at)
+                WHEN (
+                  CASE
+                    WHEN s.weekly_window_start_at IS NOT NULL THEN s.weekly_window_start_at
+                    WHEN s.weekly_reset_at IS NOT NULL THEN datetime(s.weekly_reset_at, '-7 days')
+                    ELSE datetime(s.observed_at, '-7 days')
+                  END
+                ) IS NOT NULL
+                 AND datetime(u.timestamp) >= datetime(
+                  CASE
+                    WHEN s.weekly_window_start_at IS NOT NULL THEN s.weekly_window_start_at
+                    WHEN s.weekly_reset_at IS NOT NULL THEN datetime(s.weekly_reset_at, '-7 days')
+                    ELSE datetime(s.observed_at, '-7 days')
+                  END
+                 )
+                 AND datetime(u.timestamp) <= datetime(
+                  CASE
+                    WHEN s.weekly_reset_at IS NOT NULL THEN s.weekly_reset_at
+                    ELSE s.observed_at
+                  END
+                 )
                 THEN u.full_total_tokens
                 ELSE 0
               END
@@ -129,6 +213,10 @@ def create_calibration_view(conn: sqlite3.Connection) -> None:
             s.raw_weekly_pct,
             s.raw_mode,
             s.reset_text,
+            s.five_hour_reset_at,
+            s.weekly_reset_at,
+            s.five_hour_window_start_at,
+            s.weekly_window_start_at,
             s.source,
             s.dump_file,
             s.parser_version
@@ -145,6 +233,22 @@ def create_calibration_view(conn: sqlite3.Connection) -> None:
           raw_weekly_pct,
           raw_mode,
           reset_text,
+          five_hour_reset_at,
+          weekly_reset_at,
+          exact_five_hour_window_start_at,
+          exact_five_hour_window_end_at,
+          exact_weekly_window_start_at,
+          exact_weekly_window_end_at,
+          CASE
+            WHEN exact_five_hour_window_start_at IS NOT NULL AND exact_five_hour_window_end_at IS NOT NULL
+            THEN 'exact_reset_window'
+            ELSE 'rolling_5h_fallback'
+          END AS five_hour_window_source,
+          CASE
+            WHEN exact_weekly_window_start_at IS NOT NULL AND exact_weekly_window_end_at IS NOT NULL
+            THEN 'exact_reset_window'
+            ELSE 'rolling_7d_fallback'
+          END AS weekly_window_source,
           source,
           dump_file,
           parser_version,
@@ -223,7 +327,9 @@ def print_preview(conn: sqlite3.Connection) -> None:
           printf('%,d', toktok_per_1pct_5h) AS toktok_per_1pct_5h,
           printf('%,d', toktok_per_1pct_weekly) AS toktok_per_1pct_weekly,
           five_hour_estimate_status,
-          weekly_estimate_status
+          weekly_estimate_status,
+          five_hour_window_source,
+          weekly_window_source
         FROM {VIEW_NAME}
         ORDER BY observed_at DESC
         LIMIT 20
@@ -243,6 +349,8 @@ def print_preview(conn: sqlite3.Connection) -> None:
         "toktok_1pct_week",
         "5h_status",
         "week_status",
+        "5h_window",
+        "week_window",
     ]
 
     print("\t".join(headers))

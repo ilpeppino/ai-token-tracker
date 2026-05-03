@@ -24,8 +24,14 @@ if not DB_PATH.exists():
 conn = sqlite3.connect(DB_PATH)
 
 calibration_df = pd.DataFrame()
+quota_forecast_df = pd.DataFrame()
+
 calibration_view_exists = conn.execute(
     "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='calibration_estimates'"
+).fetchone()[0] > 0
+
+quota_forecast_view_exists = conn.execute(
+    "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='quota_forecast'"
 ).fetchone()[0] > 0
 
 if calibration_view_exists:
@@ -54,6 +60,32 @@ if calibration_view_exists:
           parser_version
         FROM calibration_estimates
         ORDER BY observed_at DESC
+        """,
+        conn,
+    )
+
+if quota_forecast_view_exists:
+    quota_forecast_df = pd.read_sql_query(
+        """
+        SELECT
+          provider,
+          observed_at,
+          five_hour_used_pct,
+          five_hour_remaining_pct,
+          weekly_used_pct,
+          weekly_remaining_pct,
+          toktok_last_5h,
+          toktok_last_7d,
+          estimated_5h_capacity_toktok,
+          estimated_weekly_capacity_toktok,
+          avg_toktok_per_hour_5h,
+          avg_toktok_per_hour_7d,
+          estimated_hours_to_5h_limit,
+          estimated_hours_to_weekly_limit,
+          five_hour_risk,
+          weekly_risk
+        FROM quota_forecast
+        ORDER BY provider
         """,
         conn,
     )
@@ -93,6 +125,9 @@ if df.empty:
 df["date"] = pd.to_datetime(df["date"])
 if not calibration_df.empty:
     calibration_df["observed_at"] = pd.to_datetime(calibration_df["observed_at"])
+
+if not quota_forecast_df.empty:
+    quota_forecast_df["observed_at"] = pd.to_datetime(quota_forecast_df["observed_at"])
 
 
 
@@ -249,6 +284,68 @@ if monthly_full_token_target > 0 and projected_month_full > monthly_full_token_t
 
 if today_vs_7d >= 1.5:
     st.info(f"Today is {today_vs_7d:.2f}× above your 7-day average.")
+
+st.divider()
+
+st.subheader("Quota depletion forecast")
+
+if quota_forecast_df.empty:
+    st.info(
+        "No quota forecast yet. Run browser usage scraping, sync-usage-percentages.py, "
+        "build-calibration-view.py, and build-quota-forecast-view.py."
+    )
+else:
+    forecast_cards = quota_forecast_df.copy()
+
+    for _, row in forecast_cards.iterrows():
+        provider = row["provider"]
+
+        st.markdown(f"#### {provider.capitalize()}")
+
+        f1, f2, f3, f4 = st.columns(4)
+
+        five_hour_used = row["five_hour_used_pct"]
+        weekly_used = row["weekly_used_pct"]
+
+        hrs_5h = row["estimated_hours_to_5h_limit"]
+        hrs_week = row["estimated_hours_to_weekly_limit"]
+
+        f1.metric(
+            "5h used",
+            "n/a" if pd.isna(five_hour_used) else f"{five_hour_used:.0f}%",
+        )
+        f2.metric(
+            "Weekly used",
+            "n/a" if pd.isna(weekly_used) else f"{weekly_used:.0f}%",
+        )
+        f3.metric(
+            "Estimated hours to 5h limit",
+            "n/a" if pd.isna(hrs_5h) else f"{hrs_5h:.1f}h",
+        )
+        f4.metric(
+            "Estimated hours to weekly limit",
+            "n/a" if pd.isna(hrs_week) else f"{hrs_week:.1f}h",
+        )
+
+        risk_5h = row["five_hour_risk"]
+        risk_week = row["weekly_risk"]
+
+        if risk_5h == "critical" or risk_week == "critical":
+            st.error(f"{provider.capitalize()} quota risk is critical.")
+        elif risk_5h == "warning" or risk_week == "warning":
+            st.warning(f"{provider.capitalize()} quota risk is elevated.")
+        elif risk_5h == "insufficient_data" or risk_week == "insufficient_data":
+            st.info(f"{provider.capitalize()} forecast needs more calibration data.")
+
+    forecast_table = quota_forecast_df.copy()
+    forecast_table["observed_at"] = forecast_table["observed_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    st.dataframe(forecast_table, width="stretch", hide_index=True)
+
+    st.caption(
+        "Forecast uses empirical Toktok calibration. 5h burn rate is based on the last 5 local hours. "
+        "Weekly burn rate is based on the last 7 local days. This is not an official vendor quota API."
+    )
+
 
 st.divider()
 

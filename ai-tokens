@@ -12,6 +12,7 @@ case "${1:-dashboard}" in
     "$PY" "$BASE/sync-usage.py"
     "$PY" "$BASE/sync-usage-percentages.py" || true
     "$PY" "$BASE/build-calibration-view.py" || true
+    "$PY" "$BASE/build-quota-forecast-view.py" || true
     ;;
 
   dashboard)
@@ -19,6 +20,7 @@ case "${1:-dashboard}" in
     "$PY" "$BASE/sync-usage.py"
     "$PY" "$BASE/sync-usage-percentages.py" || true
     "$PY" "$BASE/build-calibration-view.py" || true
+    "$PY" "$BASE/build-quota-forecast-view.py" || true
     "$STREAMLIT" run "$BASE/dashboard.py" --server.headless=false
     ;;
 
@@ -27,6 +29,7 @@ case "${1:-dashboard}" in
     "$PY" "$BASE/sync-usage.py"
     "$PY" "$BASE/sync-usage-percentages.py" || true
     "$PY" "$BASE/build-calibration-view.py" || true
+    "$PY" "$BASE/build-quota-forecast-view.py" || true
     "$PY" "$BASE/export-usage.py"
     ;;
 
