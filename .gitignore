@@ -1,7 +1,8 @@
 .venv/
 __pycache__/
 *.pyc
-.DS_Store
 usage.sqlite
-usage.sqlite-*
-exports/
+usage-dumps/
+browser-profile/
+.env
+.DS_Store
