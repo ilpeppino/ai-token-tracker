@@ -1,0 +1,15 @@
+{
+  "claude:critical:\ud83d\udea8 Claude 5-hour limit is projected before reset: limit in 6 min, reset in 2.0h": 1777826590.3422542,
+  "claude:critical:\ud83d\udea8 Claude 5-hour usage is critical: 98%": 1777826590.099295,
+  "claude:critical:\ud83d\udea8 Claude may hit 5-hour limit in 6 min": 1777826590.233532,
+  "claude:critical:\ud83d\udea8 \ud83e\udde0 Claude 5-hour limit is projected before reset: limit in 6 min, reset in 2.0h": 1777832954.2054489,
+  "claude:critical:\ud83d\udea8 \ud83e\udde0 Claude 5-hour usage is critical: 98%": 1777832953.929952,
+  "claude:critical:\ud83d\udea8 \ud83e\udde0 Claude may hit 5-hour limit in 6 min": 1777832954.0927649,
+  "codex:critical:\ud83d\udea8 Codex may hit weekly limit in 5.2h": 1777826590.553216,
+  "codex:critical:\ud83d\udea8 Codex weekly limit is projected before reset: limit in 5.2h, reset in 41.7h": 1777826590.670827,
+  "codex:critical:\ud83d\udea8 Codex weekly usage is critical: 97%": 1777826590.4448829,
+  "codex:critical:\ud83d\udea8 \ud83e\udd16 Codex may hit weekly limit in 5.2h": 1777832954.45958,
+  "codex:critical:\ud83d\udea8 \ud83e\udd16 Codex weekly limit is projected before reset: limit in 5.2h, reset in 40.0h": 1777832954.5791202,
+  "codex:critical:\ud83d\udea8 \ud83e\udd16 Codex weekly limit is projected before reset: limit in 5.2h, reset in 41.7h": 1777829895.62802,
+  "codex:critical:\ud83d\udea8 \ud83e\udd16 Codex weekly usage is critical: 97%": 1777832954.3489249
+}

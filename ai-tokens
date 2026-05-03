@@ -15,6 +15,16 @@ case "${1:-dashboard}" in
     "$PY" "$BASE/build-quota-forecast-view.py" || true
     ;;
 
+  sync-notify)
+    "$DUMP_SCRIPT" || true
+    "$PY" "$BASE/sync-usage.py"
+    "$PY" "$BASE/sync-usage-percentages.py" || true
+    "$PY" "$BASE/build-calibration-view.py" || true
+    "$PY" "$BASE/build-quota-forecast-view.py" || true
+    "$PY" "$BASE/notify.py"
+    "$PY" "$BASE/reset-notify.py"
+    ;;
+
   dashboard)
     "$DUMP_SCRIPT" || true
     "$PY" "$BASE/sync-usage.py"
@@ -22,6 +32,18 @@ case "${1:-dashboard}" in
     "$PY" "$BASE/build-calibration-view.py" || true
     "$PY" "$BASE/build-quota-forecast-view.py" || true
     "$STREAMLIT" run "$BASE/dashboard.py" --server.headless=false
+    ;;
+
+  notify)
+    "$PY" "$BASE/notify.py"
+    ;;
+
+  reset-notify)
+    "$PY" "$BASE/reset-notify.py"
+    ;;
+
+  bot)
+    "$PY" "$BASE/telegram-bot.py"
     ;;
 
   export)
@@ -42,6 +64,10 @@ case "${1:-dashboard}" in
     echo "  ai-tokens dashboard"
     echo "  ai-tokens sync"
     echo "    (dumps browser tabs, syncs usage, percentages, calibration view)"
+    echo "  ai-tokens notify"
+    echo "  ai-tokens reset-notify"
+    echo "  ai-tokens bot"
+    echo "  ai-tokens sync-notify"
     echo "  ai-tokens export"
     echo "  ai-tokens stats today"
     echo "  ai-tokens stats daily"

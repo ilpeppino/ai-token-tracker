@@ -1,140 +1,5 @@
 # AI Token Tracker
 
-Local Mac dashboard for tracking Claude Code and Codex CLI token usage.
-
-## Location
-
-Project folder:
-
-/Volumes/DevSSD/projects/ai-token-tracker
-
-Compatibility symlink:
-
-~/.ai-token-tracker
-
-## Commands
-
-Open dashboard:
-
-ai-tokens dashboard
-
-Sync usage data:
-
-ai-tokens sync
-
-Export CSV/JSON backup:
-
-ai-tokens export
-
-Terminal stats:
-
-ai-tokens stats today
-ai-tokens stats daily
-
-Direct local scripts:
-
-./run.sh
-./sync.sh
-./export.sh
-
-## Data Sources
-
-Claude reads:
-
-~/.claude/token-usage.jsonl
-~/.claude/projects/*/*.jsonl
-
-Claude provides:
-
-- Input tokens
-- Output tokens
-- Cache read tokens
-- Cache write tokens
-- Estimated cost
-
-Codex reads:
-
-~/.codex/state_5.sqlite
-
-Codex provides:
-
-- Reported total tokens only
-
-Codex does not provide:
-
-- Input/output/cache split
-- Cost breakdown
-
-## Local Database
-
-~/.ai-token-tracker/usage.sqlite
-
-Actual path, via symlink:
-
-/Volumes/DevSSD/projects/ai-token-tracker/usage.sqlite
-
-## Dashboard Features
-
-- Daily usage charts
-- Tool split breakdown
-- Project split breakdown
-- 7-day moving averages
-- Month-to-date usage
-- Projected monthly usage
-- Claude cost estimates
-- Top sessions table
-
-## Metric Definitions
-
-MAIN_TOTAL:
-
-Claude: input + output
-
-Codex: reported total tokens
-
-FULL_TOTAL:
-
-Claude: input + output + cache read + cache write
-
-Codex: reported total tokens
-
-## Limitations
-
-- Claude cost is estimated from configured Sonnet pricing
-- Codex cost is unavailable because local DB does not expose token category breakdown
-- Codex total comes from local SQLite and may not equal an official billing/API usage number
-
-## Backup / Export
-
-Exports are stored in:
-
-~/.ai-token-tracker/exports/
-
-## Auto Sync
-
-LaunchAgent runs sync automatically every 5 minutes:
-
-~/Library/LaunchAgents/com.peppe.ai-token-sync.plist
-
-## Troubleshooting
-
-Check sync logs:
-
-tail -f /tmp/ai-token-sync.out /tmp/ai-token-sync.err
-
-Restart LaunchAgent:
-
-launchctl unload ~/Library/LaunchAgents/com.peppe.ai-token-sync.plist
-launchctl load ~/Library/LaunchAgents/com.peppe.ai-token-sync.plist
-
-## Reinstall
-
-From project folder:
-
-./install.sh
-
-# AI Token Tracker
-
 Local Mac dashboard for tracking AI coding-agent usage across Claude Code and Codex CLI.
 
 The project normalizes local usage into a practical measurement unit called **Toktok**. Toktok does **not** claim to be an official vendor token. It is a local, empirical usage unit used to compare agentic AI consumption across tools and correlate that usage with vendor-reported quota percentages.
@@ -175,6 +40,30 @@ Sync local usage data:
 
 ```bash
 ai-tokens sync
+```
+
+Check quota/risk alerts manually:
+
+```bash
+ai-tokens notify
+```
+
+Check reset notifications manually:
+
+```bash
+ai-tokens reset-notify
+```
+
+Run sync + alerts + reset checks:
+
+```bash
+ai-tokens sync-notify
+```
+
+Run Telegram interactive bot:
+
+```bash
+ai-tokens bot
 ```
 
 Export CSV/JSON backup:
@@ -256,6 +145,7 @@ These pages are used to capture vendor-reported quota percentages such as:
 - 5-hour window usage
 - Weekly usage
 - Remaining quota / used quota
+- Reset timestamps / countdowns when exposed by provider pages
 
 The browser usage extraction is best-effort and depends on page text remaining parseable.
 
@@ -291,6 +181,12 @@ Calibration view:
 calibration_estimates
 ```
 
+Quota forecast view:
+
+```text
+quota_forecast
+```
+
 ## Dashboard Features
 
 - Daily usage charts
@@ -304,6 +200,11 @@ calibration_estimates
 - Budget and forecast widgets
 - Browser-derived quota percentage snapshots
 - Calibration estimates between Toktok and vendor quota percentages
+- Quota forecast / depletion prediction
+- 5-hour and weekly reset countdowns
+- Telegram alert integration
+- Telegram interactive status bot
+- Automatic reset notifications
 
 ## Metric Definitions
 
@@ -415,25 +316,51 @@ Export command:
 ai-tokens export
 ```
 
-## Auto Sync
+## Background Automation
 
-A macOS LaunchAgent can run sync automatically every 5 minutes:
+The project can run fully automated on macOS using LaunchAgents.
+
+### Sync / Forecast / Notifications
+
+Runs every 5 minutes:
 
 ```text
 ~/Library/LaunchAgents/com.peppe.ai-token-sync.plist
 ```
 
-Check sync logs:
+Per run it executes:
+
+1. Usage sync
+2. Browser quota snapshot sync
+3. Calibration rebuild
+4. Forecast rebuild
+5. Telegram quota/risk alerts
+6. Telegram reset notifications
+
+Logs:
 
 ```bash
 tail -f /tmp/ai-token-sync.out /tmp/ai-token-sync.err
 ```
 
-Restart LaunchAgent:
+### Telegram Interactive Bot
+
+Runs continuously in background:
+
+```text
+~/Library/LaunchAgents/com.peppe.ai-token-telegram-bot.plist
+```
+
+Logs:
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.peppe.ai-token-sync.plist
-launchctl load ~/Library/LaunchAgents/com.peppe.ai-token-sync.plist
+tail -f /tmp/ai-token-telegram-bot.out /tmp/ai-token-telegram-bot.err
+```
+
+### Service Management
+
+```bash
+launchctl list | grep ai-token
 ```
 
 ## Reinstall
@@ -452,5 +379,8 @@ From the project folder:
 - Add automated browser snapshot command to the main launcher.
 - Add provider/model configuration files.
 - Add historical pricing support.
-- Add threshold alerts for high usage or projected lockout risk.
 - Add weekly/monthly summary reports.
+- Add Telegram remote threshold configuration commands.
+- Add Telegram mute/snooze alert commands.
+- Add richer reset prediction / drift correction.
+- Add multi-user / multi-chat Telegram support.

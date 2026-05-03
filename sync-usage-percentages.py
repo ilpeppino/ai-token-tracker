@@ -136,6 +136,27 @@ def parse_absolute_local_datetime(value: str, observed_at: datetime) -> datetime
     return None
 
 
+def parse_time_only_local_datetime(value: str, observed_at: datetime) -> datetime | None:
+    """Parse page text like `11:12 PM` in local timezone."""
+    cleaned = " ".join(value.strip().split())
+
+    for fmt in ["%I:%M %p", "%H:%M"]:
+        try:
+            parsed_time = datetime.strptime(cleaned, fmt).time()
+            local_observed = observed_at.astimezone(LOCAL_TZ)
+            parsed = datetime.combine(local_observed.date(), parsed_time, tzinfo=LOCAL_TZ)
+
+            # If the parsed time is already clearly in the past, assume tomorrow.
+            if parsed < local_observed - timedelta(minutes=5):
+                parsed = parsed + timedelta(days=1)
+
+            return parsed
+        except ValueError:
+            continue
+
+    return None
+
+
 def parse_relative_duration(text: str) -> timedelta | None:
     """Parse relative reset text like `9 hr 14 min` or `2 hours 5 minutes`."""
     low = text.lower()
@@ -157,6 +178,39 @@ def parse_relative_duration(text: str) -> timedelta | None:
         return None
 
     return timedelta(days=days, hours=hours, minutes=minutes)
+
+
+def extract_codex_five_hour_reset(text: str, observed_at: datetime) -> datetime | None:
+    """Extract Codex 5-hour reset from the 5-hour usage section."""
+    match = re.search(
+        r"5 hour usage limit.*?Resets\s+(\d{1,2}:\d{2}\s+[AP]M)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return None
+
+    return parse_time_only_local_datetime(match.group(1), observed_at)
+
+
+def extract_claude_five_hour_relative_reset(text: str, observed_at: datetime) -> datetime | None:
+    """Extract Claude current-session reset from relative text."""
+    match = re.search(
+        r"Current session.*?Resets in\s+([^\n]+)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return None
+
+    raw = match.group(1).strip()
+    raw = re.split(r"\n|\|", raw)[0].strip()
+
+    duration = parse_relative_duration(raw)
+    if duration is None:
+        return None
+
+    return observed_at + duration
 
 
 def extract_codex_absolute_reset(text: str, observed_at: datetime) -> datetime | None:
@@ -200,25 +254,24 @@ def extract_claude_weekly_relative_reset(text: str, observed_at: datetime) -> da
 def infer_reset_windows(provider: Provider, text: str, observed_at: datetime) -> ResetWindowInfo:
     """Infer reset/window timestamps from page text when possible.
 
-    Codex currently exposes an absolute reset timestamp in the analytics page.
-    Claude currently exposes a relative weekly reset such as `Resets in 9 hr 14 min`.
+    Codex exposes:
+    - 5-hour reset as a local time-only value, e.g. `Resets 11:12 PM`
+    - weekly reset as an absolute date/time, e.g. `May 5, 2026 12:27 PM`
+
+    Claude exposes:
+    - 5-hour reset as relative text, e.g. `Resets in 2 hr 2 min`
+    - weekly reset as relative text, e.g. `Resets in 5 hr 52 min`
     """
     five_hour_reset_at: datetime | None = None
     weekly_reset_at: datetime | None = None
 
     if provider == "codex":
-        codex_reset = extract_codex_absolute_reset(text, observed_at)
-        if codex_reset:
-            # The current Codex analytics page exposes the weekly/plan reset timestamp.
-            # It does not expose a separate 5-hour reset timestamp in the observed dump.
-            # Keep 5h reset unknown unless a future page version shows a clearly scoped
-            # 5-hour reset value.
-            weekly_reset_at = codex_reset
+        five_hour_reset_at = extract_codex_five_hour_reset(text, observed_at)
+        weekly_reset_at = extract_codex_absolute_reset(text, observed_at)
 
     elif provider == "claude":
+        five_hour_reset_at = extract_claude_five_hour_relative_reset(text, observed_at)
         weekly_reset_at = extract_claude_weekly_relative_reset(text, observed_at)
-        # Claude sample says the current session starts when a message is sent but
-        # does not expose a concrete 5h reset timestamp. Keep it unknown for now.
 
     return ResetWindowInfo(
         five_hour_reset_at=to_utc_iso(five_hour_reset_at) if five_hour_reset_at else None,
@@ -230,7 +283,6 @@ def infer_reset_windows(provider: Provider, text: str, observed_at: datetime) ->
             to_utc_iso(weekly_reset_at - timedelta(days=7)) if weekly_reset_at else None
         ),
     )
-
 
 def parse_codex(text: str, observed_at: datetime) -> ParsedUsageSnapshot:
     five_remaining = pct_after("5 hour usage limit", text, "remaining")
