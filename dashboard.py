@@ -6,7 +6,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-DB_PATH = Path.home() / ".ai-token-tracker" / "usage.sqlite"
+PROJECT_DIR = Path(__file__).resolve().parent
+DB_PATH = PROJECT_DIR / "usage.sqlite"
 
 st.set_page_config(
     page_title="AI Token Usage Dashboard",
@@ -21,6 +22,41 @@ if not DB_PATH.exists():
     st.stop()
 
 conn = sqlite3.connect(DB_PATH)
+
+calibration_df = pd.DataFrame()
+calibration_view_exists = conn.execute(
+    "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='calibration_estimates'"
+).fetchone()[0] > 0
+
+if calibration_view_exists:
+    calibration_df = pd.read_sql_query(
+        """
+        SELECT
+          snapshot_id,
+          provider,
+          observed_at,
+          five_hour_used_pct,
+          weekly_used_pct,
+          five_hour_remaining_pct,
+          weekly_remaining_pct,
+          toktok_last_5h,
+          toktok_last_7d,
+          toktok_same_day,
+          estimated_5h_capacity_toktok,
+          estimated_weekly_capacity_toktok,
+          toktok_per_1pct_5h,
+          toktok_per_1pct_weekly,
+          five_hour_estimate_status,
+          weekly_estimate_status,
+          raw_mode,
+          reset_text,
+          source,
+          parser_version
+        FROM calibration_estimates
+        ORDER BY observed_at DESC
+        """,
+        conn,
+    )
 
 df = pd.read_sql_query(
     """
@@ -55,6 +91,8 @@ if df.empty:
     st.stop()
 
 df["date"] = pd.to_datetime(df["date"])
+if not calibration_df.empty:
+    calibration_df["observed_at"] = pd.to_datetime(calibration_df["observed_at"])
 
 
 
@@ -68,7 +106,7 @@ monthly_claude_budget = st.sidebar.number_input(
 )
 
 monthly_full_token_target = st.sidebar.number_input(
-    "Monthly full-token target",
+    "Monthly full-Toktok target",
     min_value=0,
     value=1_200_000_000,
     step=10_000_000,
@@ -169,17 +207,31 @@ projected_month_cost = float((month_cost / day_of_month) * days_in_month) if day
 highest_day = int(combined_daily["full_total_tokens"].max()) if not combined_daily.empty else 0
 today_vs_7d = (today_full / avg_7_full) if avg_7_full else 0
 
+latest_calibration = pd.DataFrame()
+if not calibration_df.empty:
+    latest_calibration = calibration_df.sort_values("observed_at").groupby("provider", as_index=False).tail(1)
+
+latest_five_hour = None
+latest_weekly = None
+if not latest_calibration.empty:
+    usable_weekly = latest_calibration[latest_calibration["weekly_estimate_status"] == "usable"]
+    usable_five_hour = latest_calibration[latest_calibration["five_hour_estimate_status"] == "usable"]
+    if not usable_five_hour.empty:
+        latest_five_hour = usable_five_hour.sort_values("observed_at").iloc[-1]
+    if not usable_weekly.empty:
+        latest_weekly = usable_weekly.sort_values("observed_at").iloc[-1]
+
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Today full tokens", f"{today_full:,}")
-col2.metric("7-day avg full", f"{avg_7_full:,}")
-col3.metric("Month-to-date full", f"{month_full:,}")
-col4.metric("Projected month full", f"{projected_month_full:,}")
+col1.metric("Today full Toktok", f"{today_full:,}")
+col2.metric("7-day avg full Toktok", f"{avg_7_full:,}")
+col3.metric("Month-to-date full Toktok", f"{month_full:,}")
+col4.metric("Projected month full Toktok", f"{projected_month_full:,}")
 col5.metric("Projected Claude cost", f"${projected_month_cost:,.2f}")
 
 col6, col7, col8, col9, col10 = st.columns(5)
 col6.metric("Today main tokens", f"{today_main:,}")
 col7.metric("Today sessions", f"{today_sessions:,}")
-col8.metric("Highest day full", f"{highest_day:,}")
+col8.metric("Highest day full Toktok", f"{highest_day:,}")
 col9.metric("Today vs 7d avg", f"{today_vs_7d:.2f}×")
 col10.metric("Month cost", f"${month_cost:,.2f}")
 
@@ -191,7 +243,7 @@ if monthly_claude_budget > 0 and projected_month_cost > monthly_claude_budget:
 
 if monthly_full_token_target > 0 and projected_month_full > monthly_full_token_target:
     st.warning(
-        f"Projected full-token usage is {projected_month_full:,}, "
+        f"Projected full-Toktok usage is {projected_month_full:,}, "
         f"above your {monthly_full_token_target:,} monthly target."
     )
 
@@ -200,7 +252,104 @@ if today_vs_7d >= 1.5:
 
 st.divider()
 
-st.subheader("Daily full token usage by tool")
+st.subheader("Toktok ↔ Vendor usage calibration")
+
+if calibration_df.empty:
+    st.info(
+        "No calibration data yet. Run browser usage scraping, sync-usage-percentages.py, "
+        "and build-calibration-view.py to populate this section."
+    )
+else:
+    latest_display = latest_calibration.copy()
+    latest_display["observed_at"] = latest_display["observed_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    if latest_five_hour is not None:
+        c1.metric(
+            f"{latest_five_hour['provider']} 5h used",
+            f"{latest_five_hour['five_hour_used_pct']:.0f}%",
+        )
+        c2.metric(
+            "Estimated 5h capacity",
+            f"{int(latest_five_hour['estimated_5h_capacity_toktok']):,} Toktok",
+        )
+    else:
+        c1.metric("5h used", "n/a")
+        c2.metric("Estimated 5h capacity", "n/a")
+
+    if latest_weekly is not None:
+        c3.metric(
+            f"{latest_weekly['provider']} weekly used",
+            f"{latest_weekly['weekly_used_pct']:.0f}%",
+        )
+        c4.metric(
+            "Estimated weekly capacity",
+            f"{int(latest_weekly['estimated_weekly_capacity_toktok']):,} Toktok",
+        )
+    else:
+        c3.metric("Weekly used", "n/a")
+        c4.metric("Estimated weekly capacity", "n/a")
+
+    calibration_plot_df = calibration_df.copy()
+    calibration_plot_df = calibration_plot_df[
+        calibration_plot_df["weekly_estimate_status"] == "usable"
+    ].copy()
+
+    if not calibration_plot_df.empty:
+        fig_cal = px.scatter(
+            calibration_plot_df,
+            x="toktok_last_7d",
+            y="weekly_used_pct",
+            color="provider",
+            size="estimated_weekly_capacity_toktok",
+            hover_data=[
+                "observed_at",
+                "toktok_per_1pct_weekly",
+                "estimated_weekly_capacity_toktok",
+                "reset_text",
+            ],
+            labels={
+                "toktok_last_7d": "Toktok in last 7 days",
+                "weekly_used_pct": "Vendor weekly usage %",
+                "provider": "Provider",
+            },
+            title="Weekly Toktok vs vendor usage %",
+        )
+        st.plotly_chart(fig_cal, width="stretch")
+    else:
+        st.info("No usable weekly calibration estimates yet.")
+
+    calibration_table = calibration_df.sort_values("observed_at", ascending=False).copy()
+    calibration_table["observed_at"] = calibration_table["observed_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    calibration_table = calibration_table[
+        [
+            "observed_at",
+            "provider",
+            "five_hour_used_pct",
+            "weekly_used_pct",
+            "toktok_last_5h",
+            "toktok_last_7d",
+            "estimated_5h_capacity_toktok",
+            "estimated_weekly_capacity_toktok",
+            "toktok_per_1pct_5h",
+            "toktok_per_1pct_weekly",
+            "five_hour_estimate_status",
+            "weekly_estimate_status",
+            "reset_text",
+        ]
+    ]
+    st.dataframe(calibration_table, width="stretch", hide_index=True)
+
+    st.caption(
+        "Calibration values are empirical estimates. Toktok is a local measurement unit, "
+        "not an official vendor token. 5h estimates use the previous 5 local hours; weekly "
+        "estimates use the previous 7 local days until exact vendor reset windows are modeled."
+    )
+
+st.divider()
+
+st.subheader("Daily full Toktok usage by tool")
 fig = px.line(
     daily,
     x="date",
@@ -209,7 +358,7 @@ fig = px.line(
     markers=True,
     labels={
         "date": "Date",
-        "full_total_tokens": "Full tokens",
+        "full_total_tokens": "Full Toktok",
         "tool": "Tool",
     },
 )
@@ -223,7 +372,7 @@ fig2 = px.bar(
     y="full_total_tokens",
     labels={
         "date": "Date",
-        "full_total_tokens": "Full tokens",
+        "full_total_tokens": "Full Toktok",
     },
 )
 
@@ -231,7 +380,7 @@ fig2.add_scatter(
     x=combined_daily["date"],
     y=combined_daily["full_tokens_7d_avg"],
     mode="lines+markers",
-    name="7-day avg full tokens",
+    name="7-day avg full Toktok",
 )
 
 st.plotly_chart(fig2, width="stretch")
@@ -266,7 +415,7 @@ fig4 = px.bar(
     color="tool",
     labels={
         "project": "Project",
-        "full_total_tokens": "Full tokens",
+        "full_total_tokens": "Full Toktok",
         "tool": "Tool",
     },
 )
@@ -294,8 +443,8 @@ display_df = display_df[
 st.dataframe(display_df, width="stretch", hide_index=True)
 
 st.caption(
-    "MAIN tokens = Claude input + output; Codex reported total. "
-    "FULL tokens = Claude input + output + cache read + cache write; Codex reported total."
+    "MAIN Toktok = Claude input + output; Codex reported total. "
+    "FULL Toktok = Claude input + output + cache read + cache write; Codex reported total."
 )
 
 
@@ -320,14 +469,14 @@ else:
         y="full_total_tokens",
         labels={
             "tool": "Tool",
-            "full_total_tokens": "Month-to-date full tokens",
+            "full_total_tokens": "Month-to-date full Toktok",
         },
     )
     st.plotly_chart(fig5, width="stretch")
 
     st.dataframe(month_tool, width="stretch", hide_index=True)
 
-st.subheader("Top sessions by full tokens")
+st.subheader("Top sessions by full Toktok")
 
 top_sessions = df.sort_values("full_total_tokens", ascending=False).head(20).copy()
 top_sessions["date"] = top_sessions["date"].dt.strftime("%Y-%m-%d")
@@ -364,7 +513,7 @@ projection_df = pd.DataFrame(
             "value": projected_month_full,
         },
         {
-            "metric": "Monthly full-token target",
+            "metric": "Monthly full-Toktok target",
             "value": monthly_full_token_target,
         },
     ]
@@ -376,7 +525,7 @@ fig6 = px.bar(
     y="value",
     labels={
         "metric": "Metric",
-        "value": "Full tokens",
+        "value": "Full Toktok",
     },
 )
 st.plotly_chart(fig6, width="stretch")
