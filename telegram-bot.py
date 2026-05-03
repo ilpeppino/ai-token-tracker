@@ -10,6 +10,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 from datetime import datetime
+from html import escape
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DB_PATH = PROJECT_DIR / "usage.sqlite"
@@ -43,6 +44,7 @@ def send_message(token: str, chat_id: str | int, text: str) -> None:
     telegram_api(token, "sendMessage", {
         "chat_id": str(chat_id),
         "text": text,
+        "parse_mode": "HTML",
         "disable_web_page_preview": "true",
     })
 
@@ -81,6 +83,32 @@ def fmt_hours(v: Any) -> str:
         return "n/a"
     h = float(v)
     return f"{round(h * 60):.0f} min" if h < 1 else f"{h:.1f}h"
+
+
+def fmt_int(v: Any) -> str:
+    try:
+        return f"{int(v or 0):,}"
+    except Exception:
+        return "0"
+
+
+def risk_label(value: Any) -> str:
+    risk = str(value or "unknown").lower()
+    if risk == "critical":
+        return "🔴 Critical"
+    if risk == "warning":
+        return "🟠 Warning"
+    if risk == "ok":
+        return "🟢 OK"
+    if risk == "insufficient_data":
+        return "⚪ Needs data"
+    return escape(str(value or "unknown"))
+
+
+def metric_table(rows: list[tuple[str, str]]) -> str:
+    label_width = max(len(label) for label, _ in rows)
+    lines = [f"{label:<{label_width}}  {value}" for label, value in rows]
+    return "<pre>" + escape("\n".join(lines)) + "</pre>"
 
 
 def provider_icon(provider: str) -> str:
@@ -128,34 +156,42 @@ def get_forecast(provider: str | None = None) -> list[sqlite3.Row]:
 def build_status(provider: str | None = None) -> str:
     rows = get_forecast(provider)
     if not rows:
-        return "No forecast data found. Run `ai-tokens sync` first."
+        return "No forecast data found. Run <code>ai-tokens sync</code> first."
 
-    parts = ["AI Token Tracker status", ""]
-    for r in rows:
+    parts = ["📊 <b>AI Token Tracker Status</b>", ""]
+
+    for index, r in enumerate(rows):
         p = str(r["provider"]).capitalize()
         icon = provider_icon(str(r["provider"]))
 
+        if index > 0:
+            parts.extend(["━━━━━━━━━━━━━━", ""])
+
         parts.extend([
-            f"{icon} {p}",
-            f"Observed: {fmt_datetime(r['observed_at'])}",
+            f"{icon} <b>{escape(p)}</b>",
+            f"Observed: <b>{fmt_datetime(r['observed_at'])}</b>",
             "",
-            "⏱️ 5-hour:",
-            f"- used: {fmt_pct(r['five_hour_used_pct'])}",
-            f"- remaining: {fmt_pct(r['five_hour_remaining_pct'])}",
-            f"- limit ETA: {fmt_hours(r['estimated_hours_to_5h_limit'])}",
-            f"- reset in: {fmt_hours(r['actual_hours_until_5h_reset'])}",
-            f"- risk: {r['five_hour_risk']}",
-            "",
-            "📅 Weekly:",
-            f"- used: {fmt_pct(r['weekly_used_pct'])}",
-            f"- remaining: {fmt_pct(r['weekly_remaining_pct'])}",
-            f"- limit ETA: {fmt_hours(r['estimated_hours_to_weekly_limit'])}",
-            f"- reset in: {fmt_hours(r['actual_hours_until_weekly_reset'])}",
-            f"- risk: {r['weekly_risk']}",
-            "",
-            "🧮 Toktok:",
-            f"- last 5h: {int(r['toktok_last_5h'] or 0):,}",
-            f"- last 7d/window: {int(r['toktok_last_7d'] or 0):,}",
+            "⏱️ <b>5-hour window</b>",
+            metric_table([
+                ("Used", fmt_pct(r["five_hour_used_pct"])),
+                ("Remaining", fmt_pct(r["five_hour_remaining_pct"])),
+                ("Limit ETA", fmt_hours(r["estimated_hours_to_5h_limit"])),
+                ("Reset", fmt_hours(r["actual_hours_until_5h_reset"])),
+                ("Risk", risk_label(r["five_hour_risk"])),
+            ]),
+            "📅 <b>Weekly window</b>",
+            metric_table([
+                ("Used", fmt_pct(r["weekly_used_pct"])),
+                ("Remaining", fmt_pct(r["weekly_remaining_pct"])),
+                ("Limit ETA", fmt_hours(r["estimated_hours_to_weekly_limit"])),
+                ("Reset", fmt_hours(r["actual_hours_until_weekly_reset"])),
+                ("Risk", risk_label(r["weekly_risk"])),
+            ]),
+            "🧮 <b>Toktok</b>",
+            metric_table([
+                ("Last 5h", fmt_int(r["toktok_last_5h"])),
+                ("Last 7d", fmt_int(r["toktok_last_7d"])),
+            ]),
             "",
         ])
 
@@ -164,13 +200,13 @@ def build_status(provider: str | None = None) -> str:
 
 def help_text() -> str:
     return "\n".join([
-        "AI Token Tracker commands:",
+        "<b>AI Token Tracker commands</b>",
         "",
-        "/status - Codex + Claude status",
-        "/forecast - same as status",
-        "/codex - Codex only",
-        "/claude - Claude only",
-        "/help - command list",
+        "<code>/status</code> - Codex + Claude status",
+        "<code>/forecast</code> - Same as status",
+        "<code>/codex</code> - Codex only",
+        "<code>/claude</code> - Claude only",
+        "<code>/help</code> - Command list",
     ])
 
 
@@ -186,7 +222,7 @@ def handle_command(text: str) -> str:
     if cmd == "/claude":
         return build_status("claude")
 
-    return "Unknown command. Send /help."
+    return "Unknown command. Send <code>/help</code>."
 
 
 def main() -> None:
