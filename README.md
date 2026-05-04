@@ -42,6 +42,12 @@ Sync local usage data:
 ai-tokens sync
 ```
 
+Refresh usage dashboard tabs and scrape latest browser quota data:
+
+```bash
+ai-tokens refresh
+```
+
 Check quota/risk alerts manually:
 
 ```bash
@@ -149,6 +155,8 @@ These pages are used to capture vendor-reported quota percentages such as:
 
 The browser usage extraction is best-effort and depends on page text remaining parseable.
 
+The tracker can automatically refresh the already-open Codex/Claude usage dashboard tabs before scraping, allowing background polling without manually reloading the pages.
+
 ## Local Database
 
 Main SQLite database:
@@ -205,6 +213,8 @@ quota_forecast
 - Telegram alert integration
 - Telegram interactive status bot
 - Automatic reset notifications
+- Change-based Telegram notifications (only when usage percentages change)
+- Automatic browser tab refresh before quota scraping
 
 ## Metric Definitions
 
@@ -301,6 +311,7 @@ This avoids storing credentials and avoids automating login or CAPTCHA flows.
 - Browser usage extraction can break if page text changes.
 - 5-hour and weekly window alignment is currently estimated from local timestamps unless exact reset data is captured.
 - Calibration quality depends on clean observations and repeated snapshots.
+- Browser refresh/scraping requires the authenticated usage tabs to remain open in Google Chrome.
 
 ## Backup / Export
 
@@ -322,7 +333,7 @@ The project can run fully automated on macOS using LaunchAgents.
 
 ### Sync / Forecast / Notifications
 
-Runs every 5 minutes:
+Runs every 10 minutes:
 
 ```text
 ~/Library/LaunchAgents/com.peppe.ai-token-sync.plist
@@ -330,12 +341,14 @@ Runs every 5 minutes:
 
 Per run it executes:
 
-1. Usage sync
-2. Browser quota snapshot sync
-3. Calibration rebuild
-4. Forecast rebuild
-5. Telegram quota/risk alerts
-6. Telegram reset notifications
+1. Refresh open Codex/Claude browser usage tabs
+2. Dump browser quota page content
+3. Sync local usage data
+4. Sync browser quota snapshots
+5. Rebuild calibration estimates
+6. Rebuild quota forecast
+7. Send Telegram usage-change notifications (only when 5h/weekly percentages change)
+8. Send Telegram reset notifications
 
 Logs:
 
@@ -376,7 +389,6 @@ From the project folder:
 - Add richer calibration history charts.
 - Add confidence scoring for calibration estimates.
 - Add manual calibration entry command.
-- Add automated browser snapshot command to the main launcher.
 - Add provider/model configuration files.
 - Add historical pricing support.
 - Add weekly/monthly summary reports.

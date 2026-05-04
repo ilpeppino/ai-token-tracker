@@ -1,29 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-osascript <<'APPLESCRIPT'
+BASE="/Volumes/DevSSD/projects/ai-token-tracker"
+DUMP_DIR="$BASE/usage-dumps"
+
+mkdir -p "$DUMP_DIR"
+
+osascript <<'APPLESCRIPT' > "/Volumes/DevSSD/projects/ai-token-tracker/usage-dumps/Claude.txt"
 tell application "Google Chrome"
-  set foundCount to 0
+  repeat with w from 1 to count of windows
+    set winRef to window w
 
-  repeat with w in windows
-    repeat with t in tabs of w
-      set tabUrl to URL of t
+    repeat with i from 1 to count of tabs of winRef
+      set tabRef to tab i of winRef
+      set tabUrl to URL of tabRef
 
-      if tabUrl contains "chatgpt.com/codex/cloud/settings/analytics" or tabUrl contains "claude.ai/settings/usage" then
-        set foundCount to foundCount + 1
-        set tabTitle to title of t
-
-        tell t
-          set pageText to execute javascript "document.body.innerText"
+      if tabUrl contains "claude.ai/settings/usage" then
+        tell tabRef
+          set resultText to execute javascript "(() => { var text = document.body.innerText; var lines = text.split('\\n').map(function(x) { return x.trim(); }).filter(Boolean); var interesting = lines.filter(function(line, idx) { var joined = lines.slice(Math.max(0, idx - 2), idx + 3).join(' | '); return joined.includes('Plan usage limits') || joined.includes('Current session') || joined.includes('Weekly limits') || joined.includes('All models') || joined.includes('Claude Design') || joined.includes('Last updated') || joined.includes('Additional features') || joined.includes('Daily included routine runs') || joined.includes('Extra usage') || line.includes('% used') || line.includes('Resets'); }); return interesting.join('\\n'); })()"
+          return resultText
         end tell
-
-        do shell script "echo " & quoted form of ("==============================" & linefeed & "TITLE: " & tabTitle & linefeed & "URL: " & tabUrl & linefeed & "==============================" & linefeed & pageText)
       end if
     end repeat
   end repeat
-
-  if foundCount is 0 then
-    do shell script "echo 'No matching ChatGPT Codex or Claude usage tabs found.'"
-  end if
 end tell
 APPLESCRIPT
+
+osascript <<'APPLESCRIPT' > "/Volumes/DevSSD/projects/ai-token-tracker/usage-dumps/Codex.txt"
+tell application "Google Chrome"
+  repeat with w from 1 to count of windows
+    set winRef to window w
+
+    repeat with i from 1 to count of tabs of winRef
+      set tabRef to tab i of winRef
+      set tabUrl to URL of tabRef
+
+      if tabUrl contains "chatgpt.com/codex/cloud/settings/analytics" then
+        tell tabRef
+          set resultText to execute javascript "document.body.innerText"
+          return resultText
+        end tell
+      end if
+    end repeat
+  end repeat
+end tell
+APPLESCRIPT
+
+echo "Dumped usage pages to $DUMP_DIR"
