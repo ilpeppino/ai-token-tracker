@@ -26,7 +26,7 @@ DEFAULT_THRESHOLDS = {
     "weekly_critical_pct": 95,
     "five_hour_limit_eta_hours": 0.5,
     "weekly_limit_eta_hours": 12,
-    "dedupe_seconds": 1800,
+    "dedupe_seconds": 0,
 }
 
 
@@ -108,6 +108,21 @@ def fmt_hours(value: Any) -> str:
     if hours < 1:
         return f"{round(hours * 60):.0f} min"
     return f"{hours:.1f}h"
+
+
+# --- New helper: fmt_change ---
+def fmt_change(old_value: Any, new_value: Any) -> str:
+    if old_value is None:
+        return f"new {fmt_pct(new_value)}"
+
+    try:
+        old_f = float(old_value)
+        new_f = float(new_value)
+        diff = new_f - old_f
+        sign = "+" if diff > 0 else ""
+        return f"{fmt_pct(old_f)} → {fmt_pct(new_f)} ({sign}{diff:.0f} pp)"
+    except Exception:
+        return f"{old_value} → {new_value}"
 
 
 def send_telegram(token: str, chat_id: str, text: str) -> None:
@@ -262,6 +277,52 @@ def build_message(row: sqlite3.Row, headline: str) -> str:
     )
 
 
+# --- New: build_change_message ---
+def build_change_message(row: sqlite3.Row, changed_fields: list[tuple[str, Any, Any]]) -> str:
+    provider = provider_label(row)
+
+    lines = [
+        f"🔄 {provider} usage changed",
+        "",
+        "AI Token Tracker",
+        f"Observed: {fmt_datetime(row['observed_at'])}",
+        "",
+        "Changes:",
+    ]
+
+    for label, old_value, new_value in changed_fields:
+        lines.append(f"- {label}: {fmt_change(old_value, new_value)}")
+
+    lines.extend(
+        [
+            "",
+            "⏱️ 5-hour window:",
+            f"- used: {fmt_pct(row['five_hour_used_pct'])}",
+            f"- remaining: {fmt_pct(row['five_hour_remaining_pct'])}",
+            f"- estimated limit ETA: {fmt_hours(row['estimated_hours_to_5h_limit'])}",
+            f"- reset countdown: {fmt_hours(row['actual_hours_until_5h_reset'])}",
+            f"- reset status: {row['five_hour_reset_status']}",
+            f"- risk: {row['five_hour_risk']}",
+            "",
+            "📅 Weekly window:",
+            f"- used: {fmt_pct(row['weekly_used_pct'])}",
+            f"- remaining: {fmt_pct(row['weekly_remaining_pct'])}",
+            f"- estimated limit ETA: {fmt_hours(row['estimated_hours_to_weekly_limit'])}",
+            f"- reset countdown: {fmt_hours(row['actual_hours_until_weekly_reset'])}",
+            f"- reset status: {row['weekly_reset_status']}",
+            f"- risk: {row['weekly_risk']}",
+            "",
+            "🧮 Toktok:",
+            f"- last 5h: {int(row['toktok_last_5h'] or 0):,}",
+            f"- last 7d/window: {int(row['toktok_last_7d'] or 0):,}",
+            f"- estimated 5h capacity: {int(row['estimated_5h_capacity_toktok'] or 0):,}",
+            f"- estimated weekly capacity: {int(row['estimated_weekly_capacity_toktok'] or 0):,}",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
 def should_send(state: dict[str, Any], key: str, dedupe_seconds: int) -> bool:
     now = time.time()
     last = float(state.get(key, 0) or 0)
@@ -269,6 +330,56 @@ def should_send(state: dict[str, Any], key: str, dedupe_seconds: int) -> bool:
         return False
     state[key] = now
     return True
+
+
+# --- New helpers for percentage change tracking ---
+def pct_state_key(provider: str) -> str:
+    return f"usage_pct_state:{provider}"
+
+
+def normalize_pct(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(float(value), 2)
+    except Exception:
+        return None
+
+
+def get_changed_percentage_fields(row: sqlite3.Row, state: dict[str, Any]) -> list[tuple[str, Any, Any]]:
+    provider = str(row["provider"]).lower()
+    key = pct_state_key(provider)
+    previous = state.get(key, {}) if isinstance(state.get(key), dict) else {}
+
+    fields = {
+        "five_hour_used_pct": "5-hour used",
+        "weekly_used_pct": "Weekly used",
+    }
+
+    changed: list[tuple[str, Any, Any]] = []
+
+    for field, label in fields.items():
+        current_value = normalize_pct(row[field])
+        previous_value = normalize_pct(previous.get(field))
+
+        if current_value is None:
+            continue
+
+        if previous_value is None:
+            changed.append((label, None, current_value))
+        elif current_value != previous_value:
+            changed.append((label, previous_value, current_value))
+
+    return changed
+
+
+def update_percentage_state(row: sqlite3.Row, state: dict[str, Any]) -> None:
+    provider = str(row["provider"]).lower()
+    state[pct_state_key(provider)] = {
+        "observed_at": row["observed_at"],
+        "five_hour_used_pct": normalize_pct(row["five_hour_used_pct"]),
+        "weekly_used_pct": normalize_pct(row["weekly_used_pct"]),
+    }
 
 
 def main() -> None:
@@ -296,30 +407,15 @@ def main() -> None:
     suppressed = 0
 
     for row in rows:
-        alerts = threshold_alerts(row, thresholds)
+        changed_fields = get_changed_percentage_fields(row, state)
+        update_percentage_state(row, state)
 
-        if alerts:
-            # Consolidate all active warning conditions into one provider-level alert.
-            # This avoids repeated Telegram messages every sync run.
-            highest = "warning"
-            if any(severity == "critical" for severity, _ in alerts):
-                highest = "critical"
-            elif any(severity == "high" for severity, _ in alerts):
-                highest = "high"
+        if not changed_fields:
+            suppressed += 1
+            continue
 
-            provider = str(row["provider"]).lower()
-            key = f"{provider}:{highest}:consolidated"
-
-            headline = alerts[0][1]
-            if len(alerts) > 1:
-                headline = headline + f" (+{len(alerts) - 1} more condition{'s' if len(alerts) != 2 else ''})"
-
-            if not should_send(state, key, int(thresholds["dedupe_seconds"])):
-                suppressed += 1
-                continue
-
-            send_telegram(token, chat_id, build_message(row, headline))
-            sent += 1
+        send_telegram(token, chat_id, build_change_message(row, changed_fields))
+        sent += 1
 
     save_state(state)
 

@@ -5,9 +5,16 @@ BASE="/Volumes/DevSSD/projects/ai-token-tracker"
 PY="$BASE/.venv/bin/python"
 STREAMLIT="$BASE/.venv/bin/streamlit"
 DUMP_SCRIPT="$BASE/read-open-usage-tabs.sh"
+REFRESH_SCRIPT="$BASE/refresh-usage-tabs.sh"
 
 case "${1:-dashboard}" in
+  refresh)
+    "$REFRESH_SCRIPT" || true
+    "$DUMP_SCRIPT" || true
+    ;;
+
   sync)
+    "$REFRESH_SCRIPT" || true
     "$DUMP_SCRIPT" || true
     "$PY" "$BASE/sync-usage.py"
     "$PY" "$BASE/sync-usage-percentages.py" || true
@@ -16,6 +23,7 @@ case "${1:-dashboard}" in
     ;;
 
   sync-notify)
+    "$REFRESH_SCRIPT" || true
     "$DUMP_SCRIPT" || true
     "$PY" "$BASE/sync-usage.py"
     "$PY" "$BASE/sync-usage-percentages.py" || true
@@ -26,6 +34,7 @@ case "${1:-dashboard}" in
     ;;
 
   dashboard)
+    "$REFRESH_SCRIPT" || true
     "$DUMP_SCRIPT" || true
     "$PY" "$BASE/sync-usage.py"
     "$PY" "$BASE/sync-usage-percentages.py" || true
@@ -47,6 +56,7 @@ case "${1:-dashboard}" in
     ;;
 
   export)
+    "$REFRESH_SCRIPT" || true
     "$DUMP_SCRIPT" || true
     "$PY" "$BASE/sync-usage.py"
     "$PY" "$BASE/sync-usage-percentages.py" || true
@@ -62,8 +72,9 @@ case "${1:-dashboard}" in
   *)
     echo "Usage:"
     echo "  ai-tokens dashboard"
+    echo "  ai-tokens refresh"
     echo "  ai-tokens sync"
-    echo "    (dumps browser tabs, syncs usage, percentages, calibration view)"
+    echo "    (refreshes/dumps browser tabs, syncs usage, percentages, calibration + forecast views)"
     echo "  ai-tokens notify"
     echo "  ai-tokens reset-notify"
     echo "  ai-tokens bot"
