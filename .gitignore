@@ -6,3 +6,4 @@ usage-dumps/
 browser-profile/
 .env
 .DS_Store
+.aider*

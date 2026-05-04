@@ -298,8 +298,21 @@ def main() -> None:
     for row in rows:
         alerts = threshold_alerts(row, thresholds)
 
-        for severity, headline in alerts:
-            key = f"{row['provider']}:{severity}:{headline}"
+        if alerts:
+            # Consolidate all active warning conditions into one provider-level alert.
+            # This avoids repeated Telegram messages every sync run.
+            highest = "warning"
+            if any(severity == "critical" for severity, _ in alerts):
+                highest = "critical"
+            elif any(severity == "high" for severity, _ in alerts):
+                highest = "high"
+
+            provider = str(row["provider"]).lower()
+            key = f"{provider}:{highest}:consolidated"
+
+            headline = alerts[0][1]
+            if len(alerts) > 1:
+                headline = headline + f" (+{len(alerts) - 1} more condition{'s' if len(alerts) != 2 else ''})"
 
             if not should_send(state, key, int(thresholds["dedupe_seconds"])):
                 suppressed += 1
