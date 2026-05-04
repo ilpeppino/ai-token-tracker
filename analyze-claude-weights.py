@@ -23,6 +23,7 @@ from typing import Any
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DB_PATH = PROJECT_DIR / "usage.sqlite"
+MAX_ALIGNMENT_LAG_MINUTES = 30.0
 
 
 @dataclass(frozen=True)
@@ -379,6 +380,12 @@ def print_aligned_samples(conn: sqlite3.Connection, snapshots: list[Snapshot]) -
 
         if pending_start is not None and pending_totals.full_total > 0 and has_positive_pct:
             lag_minutes = (current.observed_dt - pending_start.observed_dt).total_seconds() / 60.0
+
+            if lag_minutes > MAX_ALIGNMENT_LAG_MINUTES:
+                pending_start = None
+                pending_totals = TokenTotals()
+                continue
+
             row = [
                 fmt_dt(pending_start.observed_dt),
                 fmt_dt(current.observed_dt),
@@ -416,6 +423,12 @@ def print_aligned_samples(conn: sqlite3.Connection, snapshots: list[Snapshot]) -
             pending_start = None
             pending_totals = TokenTotals()
 
+        if pending_start is not None:
+            pending_lag_minutes = (current.observed_dt - pending_start.observed_dt).total_seconds() / 60.0
+            if pending_lag_minutes > MAX_ALIGNMENT_LAG_MINUTES:
+                pending_start = None
+                pending_totals = TokenTotals()
+
     if aligned_count == 0:
         print("No aligned samples found yet.")
 
@@ -424,6 +437,7 @@ def print_aligned_samples(conn: sqlite3.Connection, snapshots: list[Snapshot]) -
     print("- token_from = first interval where carried token activity started")
     print("- pct_to = snapshot where quota percentage movement was observed")
     print("- lag_min = elapsed time between token activity and observed percentage movement")
+    print(f"- samples are discarded when lag_min exceeds {MAX_ALIGNMENT_LAG_MINUTES:.0f} minutes")
     print("- This helps when local tokens are logged before the provider usage page updates")
 
 

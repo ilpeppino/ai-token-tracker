@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import time
 import urllib.parse
 import urllib.request
@@ -16,6 +17,8 @@ PROJECT_DIR = Path(__file__).resolve().parent
 DB_PATH = PROJECT_DIR / "usage.sqlite"
 ENV_PATH = PROJECT_DIR / ".env"
 STATE_PATH = PROJECT_DIR / ".telegram-bot-state.json"
+AI_TOKENS_SCRIPT = PROJECT_DIR / "ai-tokens"
+STATUS_REFRESH_TIMEOUT_SECONDS = 90
 
 
 def load_env() -> dict[str, str]:
@@ -115,6 +118,40 @@ def provider_icon(provider: str) -> str:
     return {"codex": "🤖", "claude": "🧠"}.get(provider.lower(), "🔔")
 
 
+def refresh_usage_before_status() -> tuple[bool, str]:
+    """Best-effort refresh before replying to Telegram status commands.
+
+    This intentionally falls back to the last database state if refresh/sync fails.
+    """
+    try:
+        result = subprocess.run(
+            [str(AI_TOKENS_SCRIPT), "sync"],
+            cwd=str(PROJECT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=STATUS_REFRESH_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"Refresh timed out after {STATUS_REFRESH_TIMEOUT_SECONDS}s. Showing last cached data."
+    except Exception as exc:
+        return False, f"Refresh failed: {escape(str(exc))}. Showing last cached data."
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "unknown error").strip()
+        if len(detail) > 240:
+            detail = detail[:240] + "…"
+        return False, f"Refresh failed. Showing last cached data. <code>{escape(detail)}</code>"
+
+    return True, "Refreshed just now."
+
+
+def freshness_note(success: bool, message: str) -> str:
+    if success:
+        return f"🟢 <i>{escape(message)}</i>"
+    return f"⚠️ <i>{message}</i>"
+
+
 def get_forecast(provider: str | None = None) -> list[sqlite3.Row]:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -153,12 +190,16 @@ def get_forecast(provider: str | None = None) -> list[sqlite3.Row]:
         conn.close()
 
 
-def build_status(provider: str | None = None) -> str:
+def build_status(provider: str | None = None, refresh_note: str | None = None) -> str:
     rows = get_forecast(provider)
     if not rows:
         return "No forecast data found. Run <code>ai-tokens sync</code> first."
 
-    parts = ["📊 <b>AI Token Tracker Status</b>", ""]
+    parts = ["📊 <b>AI Token Tracker Status</b>"]
+    if refresh_note:
+        parts.extend([refresh_note, ""])
+    else:
+        parts.append("")
 
     for index, r in enumerate(rows):
         p = str(r["provider"]).capitalize()
@@ -202,10 +243,10 @@ def help_text() -> str:
     return "\n".join([
         "<b>AI Token Tracker commands</b>",
         "",
-        "<code>/status</code> - Codex + Claude status",
+        "<code>/status</code> - Refresh, then show Codex + Claude status",
         "<code>/forecast</code> - Same as status",
-        "<code>/codex</code> - Codex only",
-        "<code>/claude</code> - Claude only",
+        "<code>/codex</code> - Refresh, then show Codex only",
+        "<code>/claude</code> - Refresh, then show Claude only",
         "<code>/help</code> - Command list",
     ])
 
@@ -216,11 +257,14 @@ def handle_command(text: str) -> str:
     if cmd in {"/start", "/help"}:
         return help_text()
     if cmd in {"/status", "/forecast"}:
-        return build_status()
+        ok, note = refresh_usage_before_status()
+        return build_status(refresh_note=freshness_note(ok, note))
     if cmd == "/codex":
-        return build_status("codex")
+        ok, note = refresh_usage_before_status()
+        return build_status("codex", refresh_note=freshness_note(ok, note))
     if cmd == "/claude":
-        return build_status("claude")
+        ok, note = refresh_usage_before_status()
+        return build_status("claude", refresh_note=freshness_note(ok, note))
 
     return "Unknown command. Send <code>/help</code>."
 

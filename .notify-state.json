@@ -28,12 +28,12 @@
   "codex:critical:\ud83d\udea8 \ud83e\udd16 Codex weekly usage is critical: 97%": 1777840722.101608,
   "usage_pct_state:claude": {
     "five_hour_used_pct": 29.0,
-    "observed_at": "2026-05-04T12:18:50.738440+00:00",
+    "observed_at": "2026-05-04T14:00:14.218704+00:00",
     "weekly_used_pct": 14.0
   },
   "usage_pct_state:codex": {
     "five_hour_used_pct": 0.0,
-    "observed_at": "2026-05-04T12:17:04.194041+00:00",
+    "observed_at": "2026-05-04T14:00:14.218704+00:00",
     "weekly_used_pct": 98.0
   }
 }

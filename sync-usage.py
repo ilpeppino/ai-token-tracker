@@ -9,6 +9,7 @@ It reads:
 - Codex CLI thread usage from ~/.codex/state_5.sqlite
 
 It writes normalized rows into usage_sessions.
+It also writes immutable historical rows into usage_session_snapshots.
 
 Terminology:
 - Toktok is this project's local, empirical usage unit.
@@ -140,6 +141,35 @@ def ensure_db(conn: sqlite3.Connection) -> None:
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS usage_session_snapshots (
+          tool TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          date TEXT NOT NULL,
+          timestamp TEXT NOT NULL,
+          project TEXT,
+          cwd TEXT,
+          model TEXT,
+          reasoning_effort TEXT,
+
+          input_tokens INTEGER DEFAULT 0,
+          output_tokens INTEGER DEFAULT 0,
+          cache_read_tokens INTEGER DEFAULT 0,
+          cache_write_tokens INTEGER DEFAULT 0,
+
+          main_total_tokens INTEGER DEFAULT 0,
+          full_total_tokens INTEGER DEFAULT 0,
+          reported_total_tokens INTEGER DEFAULT 0,
+
+          cost_usd REAL DEFAULT 0,
+          live INTEGER DEFAULT 0,
+
+          PRIMARY KEY (tool, session_id, timestamp)
+        )
+        """
+    )
+
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_usage_sessions_date_tool
         ON usage_sessions(date, tool)
         """
@@ -156,6 +186,20 @@ def ensure_db(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_usage_sessions_timestamp
         ON usage_sessions(timestamp)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_usage_session_snapshots_timestamp
+        ON usage_session_snapshots(timestamp)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_usage_session_snapshots_tool_timestamp
+        ON usage_session_snapshots(tool, timestamp)
         """
     )
 
@@ -198,6 +242,26 @@ def upsert_session(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
     )
 
 
+def insert_session_snapshot(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO usage_session_snapshots (
+          tool, session_id, date, timestamp, project, cwd, model, reasoning_effort,
+          input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+          main_total_tokens, full_total_tokens, reported_total_tokens,
+          cost_usd, live
+        )
+        VALUES (
+          :tool, :session_id, :date, :timestamp, :project, :cwd, :model, :reasoning_effort,
+          :input_tokens, :output_tokens, :cache_read_tokens, :cache_write_tokens,
+          :main_total_tokens, :full_total_tokens, :reported_total_tokens,
+          :cost_usd, :live
+        )
+        """,
+        row,
+    )
+
+
 def load_latest_claude_snapshots() -> dict[str, dict[str, Any]]:
     """Load the latest Claude usage snapshot per session id."""
     latest_by_session: dict[str, dict[str, Any]] = {}
@@ -233,46 +297,68 @@ def sync_claude(conn: sqlite3.Connection) -> SyncResult:
     if not CLAUDE_TOKEN_LOG.exists():
         return SyncResult("claude", 0, False, CLAUDE_TOKEN_LOG)
 
-    latest_by_session = load_latest_claude_snapshots()
-    count = 0
+    latest_by_session: dict[str, dict[str, Any]] = {}
+    synced_snapshots = 0
 
-    for sid, entry in latest_by_session.items():
-        ts = entry.get("timestamp", "")
-        cwd = entry.get("cwd", "")
+    with CLAUDE_TOKEN_LOG.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
 
-        input_tokens = as_int(entry.get("input_tokens"))
-        output_tokens = as_int(entry.get("output_tokens"))
-        cache_write = as_int(entry.get("cache_creation_input_tokens"))
-        cache_read = as_int(entry.get("cache_read_input_tokens"))
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-        main_total = input_tokens + output_tokens
-        full_total = input_tokens + output_tokens + cache_read + cache_write
+            sid = entry.get("session_id")
+            ts = entry.get("timestamp")
 
-        row = {
-            "tool": "claude",
-            "session_id": sid,
-            "date": timestamp_day(ts),
-            "timestamp": ts,
-            "project": project_from_cwd(cwd),
-            "cwd": cwd,
-            "model": entry.get("model") or "sonnet-4.6",
-            "reasoning_effort": entry.get("reasoning_effort") or "",
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_read_tokens": cache_read,
-            "cache_write_tokens": cache_write,
-            "main_total_tokens": main_total,
-            "full_total_tokens": full_total,
-            "reported_total_tokens": main_total,
-            "cost_usd": claude_cost(input_tokens, output_tokens, cache_read, cache_write),
-            "live": 0,
-        }
+            if not sid or not ts:
+                continue
 
+            cwd = entry.get("cwd", "")
+
+            input_tokens = as_int(entry.get("input_tokens"))
+            output_tokens = as_int(entry.get("output_tokens"))
+            cache_write = as_int(entry.get("cache_creation_input_tokens"))
+            cache_read = as_int(entry.get("cache_read_input_tokens"))
+
+            main_total = input_tokens + output_tokens
+            full_total = input_tokens + output_tokens + cache_read + cache_write
+
+            row = {
+                "tool": "claude",
+                "session_id": sid,
+                "date": timestamp_day(ts),
+                "timestamp": ts,
+                "project": project_from_cwd(cwd),
+                "cwd": cwd,
+                "model": entry.get("model") or "sonnet-4.6",
+                "reasoning_effort": entry.get("reasoning_effort") or "",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read,
+                "cache_write_tokens": cache_write,
+                "main_total_tokens": main_total,
+                "full_total_tokens": full_total,
+                "reported_total_tokens": main_total,
+                "cost_usd": claude_cost(input_tokens, output_tokens, cache_read, cache_write),
+                "live": 0,
+            }
+
+            insert_session_snapshot(conn, row)
+            synced_snapshots += 1
+
+            current = latest_by_session.get(sid)
+            if current is None or ts > current.get("timestamp", ""):
+                latest_by_session[sid] = row
+
+    for row in latest_by_session.values():
         upsert_session(conn, row)
-        count += 1
 
     conn.commit()
-    return SyncResult("claude", count, True, CLAUDE_TOKEN_LOG)
+    return SyncResult("claude", synced_snapshots, True, CLAUDE_TOKEN_LOG)
 
 
 def sync_codex(conn: sqlite3.Connection) -> SyncResult:
@@ -330,6 +416,7 @@ def sync_codex(conn: sqlite3.Connection) -> SyncResult:
         }
 
         upsert_session(conn, normalized)
+        insert_session_snapshot(conn, normalized)
         count += 1
 
     conn.commit()
