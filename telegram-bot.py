@@ -11,12 +11,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from html import escape
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DB_PATH = PROJECT_DIR / "usage.sqlite"
 ENV_PATH = PROJECT_DIR / ".env"
 STATE_PATH = PROJECT_DIR / ".telegram-bot-state.json"
+LOCAL_TIMEZONE = ZoneInfo("Europe/Amsterdam")
 AI_TOKENS_SCRIPT = PROJECT_DIR / "ai-tokens"
 STATUS_REFRESH_TIMEOUT_SECONDS = 90
 
@@ -72,6 +74,8 @@ def fmt_datetime(value: Any) -> str:
     try:
         raw = str(value).replace("Z", "+00:00")
         dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(LOCAL_TIMEZONE)
         return dt.strftime("%d-%m-%Y %H:%M")
     except Exception:
         return str(value)[:16]
