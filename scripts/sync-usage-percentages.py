@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_DIR / "usage.sqlite"
 DUMP_DIR = PROJECT_DIR / "usage-dumps"
 

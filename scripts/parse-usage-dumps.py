@@ -2,7 +2,8 @@
 import re
 from pathlib import Path
 
-DUMP_DIR = Path("./usage-dumps")
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+DUMP_DIR = PROJECT_DIR / "usage-dumps"
 
 
 def pct_after(label, text, mode="used"):

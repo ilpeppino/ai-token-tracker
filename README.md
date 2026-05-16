@@ -28,6 +28,20 @@ Compatibility symlink:
 ~/.ai-token-tracker
 ```
 
+## Project Layout
+
+```text
+ai-tokens          Main command dispatcher.
+install.sh        Local installer for the command and virtual environment.
+run.sh            Compatibility wrapper for dashboard startup.
+sync.sh           Compatibility wrapper for local usage sync.
+export.sh         Compatibility wrapper for export.
+scripts/          Python and shell implementation scripts.
+exports/          Generated CSV/JSON exports.
+usage-dumps/      Generated browser page text dumps.
+usage.sqlite      Local SQLite database.
+```
+
 ## Commands
 
 Open dashboard:
@@ -91,6 +105,8 @@ Direct local scripts:
 ./run.sh
 ./sync.sh
 ./export.sh
+./scripts/sync-usage.py
+./scripts/sync-usage-percentages.py
 ```
 
 ## Data Sources

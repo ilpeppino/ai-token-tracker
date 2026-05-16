@@ -4,12 +4,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_DIR / "usage.sqlite"
 
 def main() -> None:
     if not DB_PATH.exists():
-        raise SystemExit(f"Database not found: {DB_PATH}. Run sync-usage.py first.")
+        raise SystemExit(f"Database not found: {DB_PATH}. Run scripts/sync-usage.py first.")
 
     conn = sqlite3.connect(DB_PATH)
 

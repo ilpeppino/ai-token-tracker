@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE="/Volumes/DevSSD/projects/ai-token-tracker"
+BASE="$(cd "$(dirname "$0")/.." && pwd)"
 DUMP_DIR="$BASE/usage-dumps"
 
 mkdir -p "$DUMP_DIR"
 
-osascript <<'APPLESCRIPT' > "/Volumes/DevSSD/projects/ai-token-tracker/usage-dumps/Claude.txt"
+osascript <<'APPLESCRIPT' > "$DUMP_DIR/Claude.txt"
 tell application "Google Chrome"
   repeat with w from 1 to count of windows
     set winRef to window w
@@ -26,7 +26,7 @@ tell application "Google Chrome"
 end tell
 APPLESCRIPT
 
-osascript <<'APPLESCRIPT' > "/Volumes/DevSSD/projects/ai-token-tracker/usage-dumps/Codex.txt"
+osascript <<'APPLESCRIPT' > "$DUMP_DIR/Codex.txt"
 tell application "Google Chrome"
   repeat with w from 1 to count of windows
     set winRef to window w

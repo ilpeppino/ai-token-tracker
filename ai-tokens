@@ -1,13 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE="/Volumes/DevSSD/projects/ai-token-tracker"
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+
+BASE="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+SCRIPTS="$BASE/scripts"
 PY="$BASE/.venv/bin/python"
 STREAMLIT="$BASE/.venv/bin/streamlit"
-DUMP_SCRIPT="$BASE/read-open-usage-tabs.sh"
-REFRESH_SCRIPT="$BASE/refresh-usage-tabs.sh"
+DUMP_SCRIPT="$SCRIPTS/read-open-usage-tabs.sh"
+REFRESH_SCRIPT="$SCRIPTS/refresh-usage-tabs.sh"
 
 case "${1:-dashboard}" in
+  help|-h|--help)
+    echo "Usage:"
+    echo "  ai-tokens dashboard"
+    echo "  ai-tokens refresh"
+    echo "  ai-tokens sync"
+    echo "    (refreshes/dumps browser tabs, syncs usage, percentages, calibration + forecast views)"
+    echo "  ai-tokens notify"
+    echo "  ai-tokens reset-notify"
+    echo "  ai-tokens bot"
+    echo "  ai-tokens sync-notify"
+    echo "  ai-tokens export"
+    echo "  ai-tokens stats today"
+    echo "  ai-tokens stats daily"
+    ;;
+
   refresh)
     "$REFRESH_SCRIPT" || true
     "$DUMP_SCRIPT" || true
@@ -16,57 +39,57 @@ case "${1:-dashboard}" in
   sync)
     "$REFRESH_SCRIPT" || true
     "$DUMP_SCRIPT" || true
-    "$PY" "$BASE/sync-usage.py"
-    "$PY" "$BASE/sync-usage-percentages.py" || true
-    "$PY" "$BASE/build-calibration-view.py" || true
-    "$PY" "$BASE/build-quota-forecast-view.py" || true
+    "$PY" "$SCRIPTS/sync-usage.py"
+    "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
+    "$PY" "$SCRIPTS/build-calibration-view.py" || true
+    "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
     ;;
 
   sync-notify)
     "$REFRESH_SCRIPT" || true
     "$DUMP_SCRIPT" || true
-    "$PY" "$BASE/sync-usage.py"
-    "$PY" "$BASE/sync-usage-percentages.py" || true
-    "$PY" "$BASE/build-calibration-view.py" || true
-    "$PY" "$BASE/build-quota-forecast-view.py" || true
-    "$PY" "$BASE/notify.py"
-    "$PY" "$BASE/reset-notify.py"
+    "$PY" "$SCRIPTS/sync-usage.py"
+    "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
+    "$PY" "$SCRIPTS/build-calibration-view.py" || true
+    "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
+    "$PY" "$SCRIPTS/notify.py"
+    "$PY" "$SCRIPTS/reset-notify.py"
     ;;
 
   dashboard)
     "$REFRESH_SCRIPT" || true
     "$DUMP_SCRIPT" || true
-    "$PY" "$BASE/sync-usage.py"
-    "$PY" "$BASE/sync-usage-percentages.py" || true
-    "$PY" "$BASE/build-calibration-view.py" || true
-    "$PY" "$BASE/build-quota-forecast-view.py" || true
-    "$STREAMLIT" run "$BASE/dashboard.py" --server.headless=false
+    "$PY" "$SCRIPTS/sync-usage.py"
+    "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
+    "$PY" "$SCRIPTS/build-calibration-view.py" || true
+    "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
+    "$STREAMLIT" run "$SCRIPTS/dashboard.py" --server.headless=false
     ;;
 
   notify)
-    "$PY" "$BASE/notify.py"
+    "$PY" "$SCRIPTS/notify.py"
     ;;
 
   reset-notify)
-    "$PY" "$BASE/reset-notify.py"
+    "$PY" "$SCRIPTS/reset-notify.py"
     ;;
 
   bot)
-    "$PY" "$BASE/telegram-bot.py"
+    "$PY" "$SCRIPTS/telegram-bot.py"
     ;;
 
   export)
     "$REFRESH_SCRIPT" || true
     "$DUMP_SCRIPT" || true
-    "$PY" "$BASE/sync-usage.py"
-    "$PY" "$BASE/sync-usage-percentages.py" || true
-    "$PY" "$BASE/build-calibration-view.py" || true
-    "$PY" "$BASE/build-quota-forecast-view.py" || true
-    "$PY" "$BASE/export-usage.py"
+    "$PY" "$SCRIPTS/sync-usage.py"
+    "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
+    "$PY" "$SCRIPTS/build-calibration-view.py" || true
+    "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
+    "$PY" "$SCRIPTS/export-usage.py"
     ;;
 
   stats)
-    "$BASE/token-stats.sh" "${2:-today}"
+    "$SCRIPTS/token-stats.sh" "${2:-today}"
     ;;
 
   *)

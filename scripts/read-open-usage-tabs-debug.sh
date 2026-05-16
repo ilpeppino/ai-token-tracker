@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT_DIR="./usage-dumps"
+BASE="$(cd "$(dirname "$0")/.." && pwd)"
+OUT_DIR="$BASE/usage-dumps"
 mkdir -p "$OUT_DIR"
 
-osascript <<'APPLESCRIPT'
+osascript "$OUT_DIR" <<'APPLESCRIPT'
+on run argv
+set outDir to item 1 of argv
+
 tell application "Google Chrome"
   set foundCount to 0
 
@@ -23,7 +27,8 @@ tell application "Google Chrome"
 
         set safeName to do shell script "python3 - <<'PY'\nimport re\nprint(re.sub(r'[^a-zA-Z0-9]+','_', '''" & tabTitle & "''')[:80])\nPY"
 
-        do shell script "cat > ./usage-dumps/" & safeName & ".txt <<'EOF'\n" & pageText & "\nEOF"
+        set dumpPath to outDir & "/" & safeName & ".txt"
+        do shell script "cat > " & quoted form of dumpPath & " <<'EOF'\n" & pageText & "\nEOF"
 
         log "Dumped: " & safeName & ".txt"
       end if
@@ -34,4 +39,5 @@ tell application "Google Chrome"
     log "No matching tabs found."
   end if
 end tell
+end run
 APPLESCRIPT

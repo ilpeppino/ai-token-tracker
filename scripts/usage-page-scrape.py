@@ -84,7 +84,7 @@ def main():
         elif provider in PAGES:
             targets = [(provider, PAGES[provider])]
         else:
-            print("Usage: usage-page-scrape.py [all|codex|claude]")
+            print("Usage: scripts/usage-page-scrape.py [all|codex|claude]")
             browser.close()
             sys.exit(1)
 
@@ -96,7 +96,7 @@ def main():
 
         print("\nDone.")
         print("If login was required, complete login in the opened browser, then rerun:")
-        print("  python usage-page-scrape.py all")
+        print("  python scripts/usage-page-scrape.py all")
 
         browser.close()
 

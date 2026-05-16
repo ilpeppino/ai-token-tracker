@@ -3,5 +3,5 @@ set -euo pipefail
 
 BASE="$(cd "$(dirname "$0")" && pwd)"
 
-"$BASE/.venv/bin/python" "$BASE/sync-usage.py"
-"$BASE/.venv/bin/streamlit" run "$BASE/dashboard.py" --server.headless=false
+"$BASE/.venv/bin/python" "$BASE/scripts/sync-usage.py"
+"$BASE/.venv/bin/streamlit" run "$BASE/scripts/dashboard.py" --server.headless=false

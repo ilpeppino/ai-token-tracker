@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 HOME = Path.home()
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 
 # Keep DB under the project folder. When the project is symlinked from
 # ~/.ai-token-tracker, both paths still resolve to the same file.

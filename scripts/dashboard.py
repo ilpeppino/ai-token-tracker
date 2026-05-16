@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_DIR / "usage.sqlite"
 
 st.set_page_config(
@@ -123,7 +123,7 @@ df = pd.read_sql_query(
 conn.close()
 
 if df.empty:
-    st.warning("No usage data found yet. Run sync-usage.py first.")
+    st.warning("No usage data found yet. Run scripts/sync-usage.py first.")
     st.stop()
 
 df["date"] = pd.to_datetime(df["date"])
@@ -295,8 +295,8 @@ st.subheader("Quota depletion forecast")
 
 if quota_forecast_df.empty:
     st.info(
-        "No quota forecast yet. Run browser usage scraping, sync-usage-percentages.py, "
-        "build-calibration-view.py, and build-quota-forecast-view.py."
+        "No quota forecast yet. Run browser usage scraping, scripts/sync-usage-percentages.py, "
+        "scripts/build-calibration-view.py, and scripts/build-quota-forecast-view.py."
     )
 else:
     forecast_cards = quota_forecast_df.copy()
@@ -388,8 +388,8 @@ st.subheader("Toktok ↔ Vendor usage calibration")
 
 if calibration_df.empty:
     st.info(
-        "No calibration data yet. Run browser usage scraping, sync-usage-percentages.py, "
-        "and build-calibration-view.py to populate this section."
+        "No calibration data yet. Run browser usage scraping, scripts/sync-usage-percentages.py, "
+        "and scripts/build-calibration-view.py to populate this section."
     )
 else:
     latest_display = latest_calibration.copy()
