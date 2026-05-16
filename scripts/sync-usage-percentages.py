@@ -157,6 +157,52 @@ def parse_time_only_local_datetime(value: str, observed_at: datetime) -> datetim
     return None
 
 
+def parse_weekday_time_local_datetime(value: str, observed_at: datetime) -> datetime | None:
+    """Parse page text like `Mon 12:00 AM` as the next local weekday/time."""
+    cleaned = " ".join(value.strip().split())
+    match = re.fullmatch(
+        r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:day|sday|nesday|rsday|urday)?\s+"
+        r"(\d{1,2}:\d{2}\s+[AP]M|\d{1,2}:\d{2})",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    weekday_key = match.group(1).lower()[:3]
+    target_weekday = {
+        "mon": 0,
+        "tue": 1,
+        "wed": 2,
+        "thu": 3,
+        "fri": 4,
+        "sat": 5,
+        "sun": 6,
+    }[weekday_key]
+
+    local_observed = observed_at.astimezone(LOCAL_TZ)
+
+    parsed_time = None
+    for fmt in ["%I:%M %p", "%H:%M"]:
+        try:
+            parsed_time = datetime.strptime(match.group(2), fmt).time()
+            break
+        except ValueError:
+            continue
+
+    if parsed_time is None:
+        return None
+
+    days_ahead = (target_weekday - local_observed.weekday()) % 7
+    parsed_date = local_observed.date() + timedelta(days=days_ahead)
+    parsed = datetime.combine(parsed_date, parsed_time, tzinfo=LOCAL_TZ)
+
+    if parsed < local_observed - timedelta(minutes=5):
+        parsed = parsed + timedelta(days=7)
+
+    return parsed
+
+
 def parse_relative_duration(text: str) -> timedelta | None:
     """Parse relative reset text like `9 hr 14 min` or `2 hours 5 minutes`."""
     low = text.lower()
@@ -232,7 +278,17 @@ def extract_codex_absolute_reset(text: str, observed_at: datetime) -> datetime |
 
 
 def extract_claude_weekly_relative_reset(text: str, observed_at: datetime) -> datetime | None:
-    """Extract Claude weekly reset from relative text like `Resets in 9 hr 14 min`."""
+    """Extract Claude All models weekly reset from visible usage page text."""
+    all_models_match = re.search(
+        r"All models.*?Resets\s+([A-Za-z]{3,9}\s+\d{1,2}:\d{2}\s+[AP]M)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if all_models_match:
+        parsed = parse_weekday_time_local_datetime(all_models_match.group(1), observed_at)
+        if parsed:
+            return parsed
+
     match = re.search(r"Weekly limits.*?Resets in\s+([^\n]+)", text, re.IGNORECASE | re.DOTALL)
     if not match:
         match = re.search(r"Resets in\s+([^\n]+)", text, re.IGNORECASE)

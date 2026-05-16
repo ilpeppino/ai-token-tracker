@@ -62,7 +62,7 @@ Refresh usage dashboard tabs and scrape latest browser quota data:
 ai-tokens refresh
 ```
 
-Check quota/risk alerts manually:
+Usage-change notifications are disabled. This compatibility command is a no-op:
 
 ```bash
 ai-tokens notify
@@ -238,7 +238,6 @@ quota_forecast
 - Telegram alert integration
 - Telegram interactive status bot
 - Automatic reset notifications
-- Change-based Telegram notifications (only when usage percentages change)
 - Automatic browser tab refresh before quota scraping
 
 ## Metric Definitions
@@ -372,8 +371,7 @@ Per run it executes:
 4. Sync browser quota snapshots
 5. Rebuild calibration estimates
 6. Rebuild quota forecast
-7. Send Telegram usage-change notifications (only when 5h/weekly percentages change)
-8. Send Telegram reset notifications
+7. Send Telegram reset notifications
 
 Logs:
 

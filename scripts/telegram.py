@@ -21,23 +21,10 @@ ENV_PATH = PROJECT_DIR / ".env"
 AI_TOKENS_SCRIPT = PROJECT_DIR / "ai-tokens"
 LOCAL_TIMEZONE = ZoneInfo("Europe/Amsterdam")
 
-NOTIFY_STATE_PATH = PROJECT_DIR / ".notify-state.json"
 RESET_STATE_PATH = PROJECT_DIR / ".reset-notify-state.json"
 BOT_STATE_PATH = PROJECT_DIR / ".telegram-bot-state.json"
 
 STATUS_REFRESH_TIMEOUT_SECONDS = 90
-
-DEFAULT_THRESHOLDS = {
-    "five_hour_warning_pct": 70,
-    "five_hour_high_pct": 85,
-    "five_hour_critical_pct": 95,
-    "weekly_warning_pct": 70,
-    "weekly_high_pct": 85,
-    "weekly_critical_pct": 95,
-    "five_hour_limit_eta_hours": 0.5,
-    "weekly_limit_eta_hours": 12,
-    "dedupe_seconds": 0,
-}
 
 PROVIDER_ICONS = {
     "codex": "🤖",
@@ -169,19 +156,6 @@ def fmt_int(value: Any) -> str:
         return "0"
 
 
-def fmt_change(old_value: Any, new_value: Any) -> str:
-    if old_value is None:
-        return f"new {fmt_pct(new_value)}"
-    try:
-        old_f = float(old_value)
-        new_f = float(new_value)
-        diff = new_f - old_f
-        sign = "+" if diff > 0 else ""
-        return f"{fmt_pct(old_f)} → {fmt_pct(new_f)} ({sign}{diff:.0f} pp)"
-    except Exception:
-        return f"{old_value} → {new_value}"
-
-
 def provider_icon(provider: str) -> str:
     return PROVIDER_ICONS.get(provider.lower(), "🔔")
 
@@ -191,23 +165,70 @@ def provider_label(provider: str) -> str:
     return f"{provider_icon(key)} {PROVIDER_LABELS.get(key, key.capitalize())}"
 
 
-def risk_label(value: Any) -> str:
-    risk = str(value or "unknown").lower()
-    if risk == "critical":
-        return "🔴 Critical"
-    if risk == "warning":
-        return "🟠 Warning"
-    if risk == "ok":
-        return "🟢 OK"
-    if risk == "insufficient_data":
-        return "⚪ Needs data"
-    return escape(str(value or "unknown"))
-
-
 def metric_table(rows: list[tuple[str, str]]) -> str:
     label_width = max(len(label) for label, _ in rows)
     lines = [f"{label:<{label_width}}  {value}" for label, value in rows]
     return "<pre>" + escape("\n".join(lines)) + "</pre>"
+
+
+def progress_bar(value: Any, used_pct: Any, width: int = 12) -> str:
+    try:
+        pct = max(0.0, min(100.0, float(value)))
+        used = max(0.0, min(100.0, float(used_pct)))
+    except Exception:
+        return "n/a"
+
+    filled = round((pct / 100.0) * width)
+    empty = width - filled
+
+    if used >= 90:
+        fill = "🟥"
+    elif used >= 80:
+        fill = "🟨"
+    else:
+        fill = "🟩"
+
+    return f"{fill * filled}{'⬜' * empty} {pct:.0f}%"
+
+
+def reset_text(row: sqlite3.Row, window: str) -> str:
+    if window == "five_hour":
+        exact = row["exact_five_hour_window_end_at"]
+        hours = row["actual_hours_until_5h_reset"]
+    else:
+        exact = row["exact_weekly_window_end_at"]
+        hours = row["actual_hours_until_weekly_reset"]
+
+    if exact is None:
+        return "n/a"
+
+    suffix = fmt_hours(hours)
+    if suffix == "n/a":
+        return fmt_datetime(exact)
+    return f"{fmt_datetime(exact)} ({suffix})"
+
+
+def window_block(row: sqlite3.Row, window: str) -> list[str]:
+    provider_name = str(row["provider"])
+    if window == "five_hour":
+        used = row["five_hour_used_pct"]
+        remaining = row["five_hour_remaining_pct"]
+        eta = row["estimated_hours_to_5h_limit"]
+    else:
+        used = row["weekly_used_pct"]
+        remaining = row["weekly_remaining_pct"]
+        eta = row["estimated_hours_to_weekly_limit"]
+
+    return [
+        f"{provider_icon(provider_name)} <b>{escape(provider_name.capitalize())}</b>",
+        "Used",
+        progress_bar(used, used),
+        "Remaining",
+        progress_bar(remaining, used),
+        f"Limit ETA: <b>{escape(fmt_hours(eta))}</b>",
+        f"Reset: <b>{escape(reset_text(row, window))}</b>",
+        "",
+    ]
 
 
 def read_forecast_rows(provider: str | None = None) -> list[sqlite3.Row]:
@@ -225,6 +246,44 @@ def read_forecast_rows(provider: str | None = None) -> list[sqlite3.Row]:
 
         return conn.execute(
             f"""
+            WITH ranked AS (
+              SELECT
+                provider,
+                observed_at,
+                five_hour_used_pct,
+                five_hour_remaining_pct,
+                weekly_used_pct,
+                weekly_remaining_pct,
+                estimated_hours_to_5h_limit,
+                estimated_hours_to_weekly_limit,
+                actual_hours_until_5h_reset,
+                actual_hours_until_weekly_reset,
+                five_hour_reset_status,
+                weekly_reset_status,
+                five_hour_risk,
+                weekly_risk,
+                estimated_5h_capacity_toktok,
+                estimated_weekly_capacity_toktok,
+                toktok_last_5h,
+                toktok_last_7d,
+                exact_five_hour_window_end_at,
+                exact_weekly_window_end_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY lower(provider)
+                  ORDER BY
+                    CASE
+                      WHEN COALESCE(five_hour_used_pct, 0) > 0
+                        OR COALESCE(weekly_used_pct, 0) > 0
+                        OR exact_five_hour_window_end_at IS NOT NULL
+                        OR exact_weekly_window_end_at IS NOT NULL
+                      THEN 1
+                      ELSE 0
+                    END DESC,
+                    observed_at DESC
+                ) AS row_number
+              FROM quota_forecast
+              {where}
+            )
             SELECT
               provider,
               observed_at,
@@ -246,8 +305,8 @@ def read_forecast_rows(provider: str | None = None) -> list[sqlite3.Row]:
               toktok_last_7d,
               exact_five_hour_window_end_at,
               exact_weekly_window_end_at
-            FROM quota_forecast
-            {where}
+            FROM ranked
+            WHERE row_number = 1
             ORDER BY provider
             """,
             args,
@@ -256,127 +315,8 @@ def read_forecast_rows(provider: str | None = None) -> list[sqlite3.Row]:
         conn.close()
 
 
-def build_usage_message(row: sqlite3.Row, headline: str) -> str:
-    return "\n".join(
-        [
-            headline,
-            "",
-            f"Provider: {provider_label(str(row['provider']))}",
-            "AI Token Tracker",
-            f"Observed: {fmt_datetime(row['observed_at'])}",
-            "",
-            "⏱️ 5-hour window:",
-            f"- used: {fmt_pct(row['five_hour_used_pct'])}",
-            f"- remaining: {fmt_pct(row['five_hour_remaining_pct'])}",
-            f"- estimated limit ETA: {fmt_hours(row['estimated_hours_to_5h_limit'])}",
-            f"- reset countdown: {fmt_hours(row['actual_hours_until_5h_reset'])}",
-            f"- reset status: {row['five_hour_reset_status']}",
-            f"- risk: {row['five_hour_risk']}",
-            "",
-            "📅 Weekly window:",
-            f"- used: {fmt_pct(row['weekly_used_pct'])}",
-            f"- remaining: {fmt_pct(row['weekly_remaining_pct'])}",
-            f"- estimated limit ETA: {fmt_hours(row['estimated_hours_to_weekly_limit'])}",
-            f"- reset countdown: {fmt_hours(row['actual_hours_until_weekly_reset'])}",
-            f"- reset status: {row['weekly_reset_status']}",
-            f"- risk: {row['weekly_risk']}",
-            "",
-            "🧮 Toktok:",
-            f"- last 5h: {fmt_int(row['toktok_last_5h'])}",
-            f"- last 7d/window: {fmt_int(row['toktok_last_7d'])}",
-            f"- estimated 5h capacity: {fmt_int(row['estimated_5h_capacity_toktok'])}",
-            f"- estimated weekly capacity: {fmt_int(row['estimated_weekly_capacity_toktok'])}",
-        ]
-    )
-
-
-def build_change_message(
-    row: sqlite3.Row,
-    changed_fields: list[tuple[str, Any, Any]],
-) -> str:
-    lines = [
-        f"🔄 {provider_label(str(row['provider']))} usage changed",
-        "",
-        "AI Token Tracker",
-        f"Observed: {fmt_datetime(row['observed_at'])}",
-        "",
-        "Changes:",
-    ]
-
-    for label, old_value, new_value in changed_fields:
-        lines.append(f"- {label}: {fmt_change(old_value, new_value)}")
-
-    return "\n".join(lines) + "\n\n" + build_usage_message(row, "").lstrip()
-
-
-def normalize_pct(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return round(float(value), 2)
-    except Exception:
-        return None
-
-
-def pct_state_key(provider: str) -> str:
-    return f"usage_pct_state:{provider}"
-
-
-def get_changed_percentage_fields(
-    row: sqlite3.Row,
-    state: dict[str, Any],
-) -> list[tuple[str, Any, Any]]:
-    provider = str(row["provider"]).lower()
-    previous = state.get(pct_state_key(provider), {})
-    if not isinstance(previous, dict):
-        previous = {}
-
-    changed: list[tuple[str, Any, Any]] = []
-    for field, label in {
-        "five_hour_used_pct": "5-hour used",
-        "weekly_used_pct": "Weekly used",
-    }.items():
-        current_value = normalize_pct(row[field])
-        previous_value = normalize_pct(previous.get(field))
-        if current_value is None:
-            continue
-        if previous_value is None or current_value != previous_value:
-            changed.append((label, previous_value, current_value))
-    return changed
-
-
-def update_percentage_state(row: sqlite3.Row, state: dict[str, Any]) -> None:
-    provider = str(row["provider"]).lower()
-    state[pct_state_key(provider)] = {
-        "observed_at": row["observed_at"],
-        "five_hour_used_pct": normalize_pct(row["five_hour_used_pct"]),
-        "weekly_used_pct": normalize_pct(row["weekly_used_pct"]),
-    }
-
-
 def run_notify() -> None:
-    token, chat_id = telegram_credentials()
-    state = load_state(NOTIFY_STATE_PATH)
-    rows = read_forecast_rows()
-
-    sent = 0
-    suppressed = 0
-
-    for row in rows:
-        changed_fields = get_changed_percentage_fields(row, state)
-        update_percentage_state(row, state)
-
-        if not changed_fields:
-            suppressed += 1
-            continue
-
-        send_message(token, chat_id, build_change_message(row, changed_fields))
-        sent += 1
-
-    save_state(NOTIFY_STATE_PATH, state)
-
-    print(f"Telegram notifications sent: {sent}")
-    print(f"Suppressed duplicates:       {suppressed}")
+    print("Usage-change Telegram notifications are disabled.")
 
 
 def build_reset_message(provider: str, window_label: str, reset_at: str) -> str:
@@ -467,46 +407,16 @@ def build_status(provider: str | None = None, refresh_note: str | None = None) -
     parts = ["📊 <b>AI Token Tracker Status</b>"]
     parts.extend([refresh_note, ""] if refresh_note else [""])
 
-    for index, row in enumerate(rows):
-        provider_name = str(row["provider"])
-        if index > 0:
-            parts.extend(["━━━━━━━━━━━━━━", ""])
+    latest_observed = max(str(row["observed_at"]) for row in rows if row["observed_at"] is not None)
+    parts.extend([f"Observed: <b>{fmt_datetime(latest_observed)}</b>", ""])
 
-        parts.extend(
-            [
-                f"{provider_icon(provider_name)} <b>{escape(provider_name.capitalize())}</b>",
-                f"Observed: <b>{fmt_datetime(row['observed_at'])}</b>",
-                "",
-                "⏱️ <b>5-hour window</b>",
-                metric_table(
-                    [
-                        ("Used", fmt_pct(row["five_hour_used_pct"])),
-                        ("Remaining", fmt_pct(row["five_hour_remaining_pct"])),
-                        ("Limit ETA", fmt_hours(row["estimated_hours_to_5h_limit"])),
-                        ("Reset", fmt_hours(row["actual_hours_until_5h_reset"])),
-                        ("Risk", risk_label(row["five_hour_risk"])),
-                    ]
-                ),
-                "📅 <b>Weekly window</b>",
-                metric_table(
-                    [
-                        ("Used", fmt_pct(row["weekly_used_pct"])),
-                        ("Remaining", fmt_pct(row["weekly_remaining_pct"])),
-                        ("Limit ETA", fmt_hours(row["estimated_hours_to_weekly_limit"])),
-                        ("Reset", fmt_hours(row["actual_hours_until_weekly_reset"])),
-                        ("Risk", risk_label(row["weekly_risk"])),
-                    ]
-                ),
-                "🧮 <b>Toktok</b>",
-                metric_table(
-                    [
-                        ("Last 5h", fmt_int(row["toktok_last_5h"])),
-                        ("Last 7d", fmt_int(row["toktok_last_7d"])),
-                    ]
-                ),
-                "",
-            ]
-        )
+    parts.append("⏱️ <b>5-hour window</b>")
+    for row in rows:
+        parts.extend(window_block(row, "five_hour"))
+
+    parts.extend(["📅 <b>Weekly limits</b>"])
+    for row in rows:
+        parts.extend(window_block(row, "weekly"))
 
     return "\n".join(parts).strip()
 
@@ -582,7 +492,7 @@ def usage() -> str:
             "Usage: scripts/telegram.py [notify|reset-notify|bot]",
             "",
             "Commands:",
-            "  notify        Send usage percentage change notifications once.",
+            "  notify        Disabled compatibility command.",
             "  reset-notify  Send reset notifications once.",
             "  bot           Run the interactive Telegram bot.",
         ]
