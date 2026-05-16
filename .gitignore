@@ -5,5 +5,8 @@ usage.sqlite
 usage-dumps/
 browser-profile/
 .env
+.notify-state.json
+.reset-notify-state.json
+.telegram-bot-state.json
 .DS_Store
 .aider*
