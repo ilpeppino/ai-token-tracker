@@ -86,6 +86,12 @@ Run Telegram interactive bot:
 ai-tokens bot
 ```
 
+Run the full Telegram flow without the dashboard:
+
+```bash
+ai-tokens telegram
+```
+
 Export CSV/JSON backup:
 
 ```bash
@@ -107,6 +113,9 @@ Direct local scripts:
 ./export.sh
 ./scripts/sync-usage.py
 ./scripts/sync-usage-percentages.py
+./scripts/telegram.py notify
+./scripts/telegram.py reset-notify
+./scripts/telegram.py bot
 ```
 
 ## Data Sources

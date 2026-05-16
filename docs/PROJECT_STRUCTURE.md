@@ -17,7 +17,7 @@ This repository keeps stable user-facing commands in the project root and moves 
 - `scripts/build-calibration-view.py`: builds the calibration view.
 - `scripts/build-quota-forecast-view.py`: builds the quota forecast view.
 - `scripts/dashboard.py`: Streamlit dashboard.
-- `scripts/notify.py`, `scripts/reset-notify.py`, `scripts/telegram-bot.py`: Telegram notification entry points.
+- `scripts/telegram.py`: Telegram usage notifications, reset notifications, and interactive bot.
 - `scripts/read-open-usage-tabs.sh`, `scripts/refresh-usage-tabs.sh`: macOS Chrome automation helpers.
 - `scripts/export-usage.py`: CSV/JSON export.
 - `scripts/token-stats.sh`: terminal stats helper.

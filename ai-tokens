@@ -25,6 +25,7 @@ case "${1:-dashboard}" in
     echo "  ai-tokens notify"
     echo "  ai-tokens reset-notify"
     echo "  ai-tokens bot"
+    echo "  ai-tokens telegram"
     echo "  ai-tokens sync-notify"
     echo "  ai-tokens export"
     echo "  ai-tokens stats today"
@@ -52,8 +53,20 @@ case "${1:-dashboard}" in
     "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
     "$PY" "$SCRIPTS/build-calibration-view.py" || true
     "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
-    "$PY" "$SCRIPTS/notify.py"
-    "$PY" "$SCRIPTS/reset-notify.py"
+    "$PY" "$SCRIPTS/telegram.py" notify
+    "$PY" "$SCRIPTS/telegram.py" reset-notify
+    ;;
+
+  telegram)
+    "$REFRESH_SCRIPT" || true
+    "$DUMP_SCRIPT" || true
+    "$PY" "$SCRIPTS/sync-usage.py"
+    "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
+    "$PY" "$SCRIPTS/build-calibration-view.py" || true
+    "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
+    "$PY" "$SCRIPTS/telegram.py" notify
+    "$PY" "$SCRIPTS/telegram.py" reset-notify
+    "$PY" "$SCRIPTS/telegram.py" bot
     ;;
 
   dashboard)
@@ -67,15 +80,15 @@ case "${1:-dashboard}" in
     ;;
 
   notify)
-    "$PY" "$SCRIPTS/notify.py"
+    "$PY" "$SCRIPTS/telegram.py" notify
     ;;
 
   reset-notify)
-    "$PY" "$SCRIPTS/reset-notify.py"
+    "$PY" "$SCRIPTS/telegram.py" reset-notify
     ;;
 
   bot)
-    "$PY" "$SCRIPTS/telegram-bot.py"
+    "$PY" "$SCRIPTS/telegram.py" bot
     ;;
 
   export)
@@ -101,6 +114,7 @@ case "${1:-dashboard}" in
     echo "  ai-tokens notify"
     echo "  ai-tokens reset-notify"
     echo "  ai-tokens bot"
+    echo "  ai-tokens telegram"
     echo "  ai-tokens sync-notify"
     echo "  ai-tokens export"
     echo "  ai-tokens stats today"
