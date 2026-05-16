@@ -165,33 +165,70 @@ def provider_label(provider: str) -> str:
     return f"{provider_icon(key)} {PROVIDER_LABELS.get(key, key.capitalize())}"
 
 
-def metric_table(rows: list[tuple[str, str]]) -> str:
-    label_width = max(len(label) for label, _ in rows)
-    lines = [f"{label:<{label_width}}  {value}" for label, value in rows]
-    return "<pre>" + escape("\n".join(lines)) + "</pre>"
-
-
-def progress_bar(value: Any, used_pct: Any, width: int = 12) -> str:
+def clamp_percentage(value: Any) -> float | None:
     try:
-        pct = max(0.0, min(100.0, float(value)))
-        used = max(0.0, min(100.0, float(used_pct)))
+        return max(0.0, min(100.0, float(value)))
+    except Exception:
+        return None
+
+
+def quota_status_dot(remaining_pct: Any) -> str:
+    pct = clamp_percentage(remaining_pct)
+    if pct is None:
+        return "⚪"
+    if pct >= 70:
+        return "🟢"
+    if pct >= 30:
+        return "🟡"
+    if pct >= 10:
+        return "🟠"
+    return "🔴"
+
+
+def quota_dot_bar(remaining_pct: Any, width: int = 10) -> str:
+    pct = clamp_percentage(remaining_pct)
+    if pct is None:
+        return "⚪" * width
+
+    if pct >= 100:
+        filled = width
+    elif pct <= 0:
+        filled = 0
+    else:
+        filled = max(1, min(width - 1, int(pct // 10)))
+
+    return quota_status_dot(pct) * filled + "⚪" * (width - filled)
+
+
+def compact_relative_time(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        hours = max(0.0, float(value))
     except Exception:
         return "n/a"
 
-    filled = round((pct / 100.0) * width)
-    empty = width - filled
-
-    if used >= 90:
-        fill = "🟥"
-    elif used >= 80:
-        fill = "🟨"
-    else:
-        fill = "🟩"
-
-    return f"{fill * filled}{'⬜' * empty} {pct:.0f}%"
+    if hours < 1:
+        return f"{max(1, round(hours * 60))}m"
+    if hours < 72:
+        return f"{round(hours)}h"
+    return f"{round(hours / 24)}d"
 
 
-def reset_text(row: sqlite3.Row, window: str) -> str:
+def compact_reset_at(value: Any) -> str:
+    dt = parse_dt(value)
+    if dt is None:
+        return "n/a"
+
+    local_dt = dt.astimezone(LOCAL_TIMEZONE)
+    now = datetime.now(timezone.utc).astimezone(LOCAL_TIMEZONE)
+
+    if local_dt.date() == now.date():
+        return local_dt.strftime("%H:%M")
+    return local_dt.strftime("%a %H:%M")
+
+
+def reset_parts(row: sqlite3.Row, window: str) -> tuple[str, str]:
     if window == "five_hour":
         exact = row["exact_five_hour_window_end_at"]
         hours = row["actual_hours_until_5h_reset"]
@@ -199,36 +236,24 @@ def reset_text(row: sqlite3.Row, window: str) -> str:
         exact = row["exact_weekly_window_end_at"]
         hours = row["actual_hours_until_weekly_reset"]
 
-    if exact is None:
-        return "n/a"
-
-    suffix = fmt_hours(hours)
-    if suffix == "n/a":
-        return fmt_datetime(exact)
-    return f"{fmt_datetime(exact)} ({suffix})"
+    return compact_reset_at(exact), compact_relative_time(hours)
 
 
-def window_block(row: sqlite3.Row, window: str) -> list[str]:
+def status_line(row: sqlite3.Row, window: str) -> str:
     provider_name = str(row["provider"])
     if window == "five_hour":
-        used = row["five_hour_used_pct"]
         remaining = row["five_hour_remaining_pct"]
-        eta = row["estimated_hours_to_5h_limit"]
     else:
-        used = row["weekly_used_pct"]
         remaining = row["weekly_remaining_pct"]
-        eta = row["estimated_hours_to_weekly_limit"]
 
-    return [
-        f"{provider_icon(provider_name)} <b>{escape(provider_name.capitalize())}</b>",
-        "Used",
-        progress_bar(used, used),
-        "Remaining",
-        progress_bar(remaining, used),
-        f"Limit ETA: <b>{escape(fmt_hours(eta))}</b>",
-        f"Reset: <b>{escape(reset_text(row, window))}</b>",
-        "",
-    ]
+    pct = clamp_percentage(remaining)
+    pct_text = "n/a" if pct is None else f"{pct:.0f}%"
+    reset_at, reset_in = reset_parts(row, window)
+    provider = provider_name.capitalize()
+    line = f"{provider:<7} {quota_dot_bar(remaining)} {pct_text:>4}"
+    if reset_at != "n/a" or reset_in != "n/a":
+        line += f" · ↺ {reset_at} · {reset_in}"
+    return line
 
 
 def read_forecast_rows(provider: str | None = None) -> list[sqlite3.Row]:
@@ -394,9 +419,7 @@ def refresh_usage_before_status() -> tuple[bool, str]:
 
 
 def freshness_note(success: bool, message: str) -> str:
-    if success:
-        return f"🟢 <i>{escape(message)}</i>"
-    return f"⚠️ <i>{message}</i>"
+    return ""
 
 
 def build_status(provider: str | None = None, refresh_note: str | None = None) -> str:
@@ -404,21 +427,25 @@ def build_status(provider: str | None = None, refresh_note: str | None = None) -
     if not rows:
         return "No forecast data found. Run <code>ai-tokens sync</code> first."
 
-    parts = ["📊 <b>AI Token Tracker Status</b>"]
-    parts.extend([refresh_note, ""] if refresh_note else [""])
+    latest_observed = max(
+        str(row["observed_at"]) for row in rows if row["observed_at"] is not None
+    )
+    observed_dt = parse_dt(latest_observed)
+    observed_time = (
+        observed_dt.astimezone(LOCAL_TIMEZONE).strftime("%H:%M")
+        if observed_dt is not None
+        else "--:--"
+    )
 
-    latest_observed = max(str(row["observed_at"]) for row in rows if row["observed_at"] is not None)
-    parts.extend([f"Observed: <b>{fmt_datetime(latest_observed)}</b>", ""])
-
-    parts.append("⏱️ <b>5-hour window</b>")
+    lines = [f"🕒 {observed_time}", "", "⚡ 5h"]
     for row in rows:
-        parts.extend(window_block(row, "five_hour"))
+        lines.append(status_line(row, "five_hour"))
 
-    parts.extend(["📅 <b>Weekly limits</b>"])
+    lines.extend(["", "📅 Weekly"])
     for row in rows:
-        parts.extend(window_block(row, "weekly"))
+        lines.append(status_line(row, "weekly"))
 
-    return "\n".join(parts).strip()
+    return "<pre>" + escape("\n".join(lines).strip()) + "</pre>"
 
 
 def help_text() -> str:
