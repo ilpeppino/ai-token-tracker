@@ -2,6 +2,8 @@
 set -euo pipefail
 
 BASE="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$BASE"
+
 OUT_DIR="$BASE/usage-dumps"
 mkdir -p "$OUT_DIR"
 

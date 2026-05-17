@@ -9,6 +9,8 @@ while [[ -L "$SOURCE" ]]; do
 done
 
 BASE="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+cd "$BASE"
+
 SCRIPTS="$BASE/scripts"
 PY="$BASE/.venv/bin/python"
 STREAMLIT="$BASE/.venv/bin/streamlit"

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+BASE="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$BASE"
+
 osascript <<'APPLESCRIPT'
 tell application "Google Chrome"
   set foundCount to 0
