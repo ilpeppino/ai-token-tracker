@@ -6,6 +6,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -22,9 +23,12 @@ AI_TOKENS_SCRIPT = PROJECT_DIR / "ai-tokens"
 LOCAL_TIMEZONE = ZoneInfo("Europe/Amsterdam")
 
 RESET_STATE_PATH = PROJECT_DIR / ".reset-notify-state.json"
+NOTIFY_STATE_PATH = PROJECT_DIR / ".notify-state.json"
 BOT_STATE_PATH = PROJECT_DIR / ".telegram-bot-state.json"
 
 STATUS_REFRESH_TIMEOUT_SECONDS = 90
+POLL_INTERVAL_SECONDS = 5 * 60
+USAGE_WARNING_THRESHOLD_PCT = 90.0
 
 PROVIDER_ICONS = {
     "codex": "🤖",
@@ -33,6 +37,11 @@ PROVIDER_ICONS = {
 
 PROVIDER_LABELS = {
     "codex": "Codex",
+    "claude": "Claude",
+}
+
+USAGE_NOTIFY_LABELS = {
+    "codex": "ChatGPT",
     "claude": "Claude",
 }
 
@@ -165,6 +174,11 @@ def provider_label(provider: str) -> str:
     return f"{provider_icon(key)} {PROVIDER_LABELS.get(key, key.capitalize())}"
 
 
+def usage_notify_label(provider: str) -> str:
+    key = provider.lower()
+    return f"{provider_icon(key)} {USAGE_NOTIFY_LABELS.get(key, PROVIDER_LABELS.get(key, key.capitalize()))}"
+
+
 def clamp_percentage(value: Any) -> float | None:
     try:
         return max(0.0, min(100.0, float(value)))
@@ -198,6 +212,34 @@ def quota_dot_bar(remaining_pct: Any, width: int = 10) -> str:
         filled = max(1, min(width - 1, int(pct // 10)))
 
     return quota_status_dot(pct) * filled + "⚪" * (width - filled)
+
+
+def usage_status_dot(used_pct: Any) -> str:
+    pct = clamp_percentage(used_pct)
+    if pct is None:
+        return "⚪"
+    if pct >= USAGE_WARNING_THRESHOLD_PCT:
+        return "🔴"
+    if pct >= 70:
+        return "🟠"
+    if pct >= 30:
+        return "🟡"
+    return "🟢"
+
+
+def usage_dot_bar(used_pct: Any, width: int = 10) -> str:
+    pct = clamp_percentage(used_pct)
+    if pct is None:
+        return "⚪" * width
+
+    if pct >= 100:
+        filled = width
+    elif pct <= 0:
+        filled = 0
+    else:
+        filled = max(1, min(width - 1, int(pct // 10)))
+
+    return usage_status_dot(pct) * filled + "⚪" * (width - filled)
 
 
 def compact_relative_time(value: Any) -> str:
@@ -242,15 +284,15 @@ def reset_parts(row: sqlite3.Row, window: str) -> tuple[str, str]:
 def status_line(row: sqlite3.Row, window: str) -> str:
     provider_name = str(row["provider"])
     if window == "five_hour":
-        remaining = row["five_hour_remaining_pct"]
+        used = row["five_hour_used_pct"]
     else:
-        remaining = row["weekly_remaining_pct"]
+        used = row["weekly_used_pct"]
 
-    pct = clamp_percentage(remaining)
-    pct_text = "n/a" if pct is None else f"{pct:.0f}%"
+    pct = clamp_percentage(used)
+    pct_text = "n/a" if pct is None else f"{pct:.0f}% used"
     reset_at, reset_in = reset_parts(row, window)
-    provider = provider_name.capitalize()
-    line = f"{provider:<7} {quota_dot_bar(remaining)} {pct_text:>4}"
+    provider = USAGE_NOTIFY_LABELS.get(provider_name.lower(), provider_name.capitalize())
+    line = f"{provider:<7} {usage_dot_bar(used)} {pct_text:>9}"
     if reset_at != "n/a" or reset_in != "n/a":
         line += f" · ↺ {reset_at} · {reset_in}"
     return line
@@ -340,8 +382,105 @@ def read_forecast_rows(provider: str | None = None) -> list[sqlite3.Row]:
         conn.close()
 
 
+def build_usage_change_message(provider: str, used_pct: float, reset_at: Any) -> str:
+    return "\n".join(
+        [
+            f"{usage_notify_label(provider)} 5-hour usage changed",
+            "",
+            f"Used: {used_pct:.0f}%",
+            f"Next reset: {fmt_datetime(reset_at)}",
+            "",
+            "AI Token Tracker",
+        ]
+    )
+
+
+def build_usage_warning_message(provider: str, used_pct: float, reset_at: Any) -> str:
+    return "\n".join(
+        [
+            f"⚠️ {usage_notify_label(provider)} usage is depleted",
+            "",
+            f"Used: {used_pct:.0f}%",
+            f"Next reset: {fmt_datetime(reset_at)}",
+            "",
+            "AI Token Tracker",
+        ]
+    )
+
+
+def build_usage_available_message(provider: str, reset_at: Any) -> str:
+    return "\n".join(
+        [
+            f"✅ {usage_notify_label(provider)} is available again",
+            "",
+            "5-hour usage has reset to 0%.",
+            f"Reset time: {fmt_datetime(reset_at)}",
+            "",
+            "AI Token Tracker",
+        ]
+    )
+
+
+def notify_for_usage_row(
+    token: str,
+    chat_id: str,
+    state: dict[str, Any],
+    row: sqlite3.Row,
+) -> bool:
+    provider = str(row["provider"]).lower()
+    if provider not in {"codex", "claude"}:
+        return False
+
+    used_pct = clamp_percentage(row["five_hour_used_pct"])
+    if used_pct is None:
+        return False
+
+    rounded_used = round(used_pct)
+    reset_at = row["exact_five_hour_window_end_at"]
+    provider_state = state.setdefault(provider, {})
+    previous_used = provider_state.get("five_hour_used_pct")
+    previous_warning_sent = bool(provider_state.get("five_hour_warning_sent"))
+
+    message: str | None = None
+
+    if rounded_used == 0:
+        if previous_used is not None and float(previous_used) > 0:
+            message = build_usage_available_message(provider, reset_at)
+        provider_state["five_hour_warning_sent"] = False
+    elif rounded_used >= USAGE_WARNING_THRESHOLD_PCT and not previous_warning_sent:
+        message = build_usage_warning_message(provider, float(rounded_used), reset_at)
+        provider_state["five_hour_warning_sent"] = True
+    elif previous_used is not None and rounded_used != round(float(previous_used)):
+        message = build_usage_change_message(provider, float(rounded_used), reset_at)
+        if rounded_used < USAGE_WARNING_THRESHOLD_PCT:
+            provider_state["five_hour_warning_sent"] = False
+    elif previous_used is None:
+        message = build_usage_change_message(provider, float(rounded_used), reset_at)
+        provider_state["five_hour_warning_sent"] = rounded_used >= USAGE_WARNING_THRESHOLD_PCT
+
+    provider_state["five_hour_used_pct"] = float(rounded_used)
+    provider_state["five_hour_reset_at"] = reset_at
+    provider_state["observed_at"] = row["observed_at"]
+
+    if message is None:
+        return False
+
+    send_message(token, chat_id, message)
+    provider_state["last_sent_at"] = datetime.now(timezone.utc).isoformat()
+    return True
+
+
 def run_notify() -> None:
-    print("Usage-change Telegram notifications are disabled.")
+    token, chat_id = telegram_credentials()
+    state = load_state(NOTIFY_STATE_PATH)
+
+    sent = 0
+    for row in read_forecast_rows():
+        if notify_for_usage_row(token, chat_id, state, row):
+            sent += 1
+
+    save_state(NOTIFY_STATE_PATH, state)
+    print(f"Usage notifications sent: {sent}")
 
 
 def build_reset_message(provider: str, window_label: str, reset_at: str) -> str:
@@ -416,6 +555,55 @@ def refresh_usage_before_status() -> tuple[bool, str]:
         return False, f"Refresh failed. Showing last cached data. <code>{escape(detail)}</code>"
 
     return True, "Refreshed just now."
+
+
+def run_usage_sync() -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            [str(AI_TOKENS_SCRIPT), "sync"],
+            cwd=str(PROJECT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=STATUS_REFRESH_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"sync timed out after {STATUS_REFRESH_TIMEOUT_SECONDS}s"
+    except Exception as exc:
+        return False, f"sync failed: {exc}"
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "unknown error").strip()
+        return False, detail[:500]
+
+    return True, "sync complete"
+
+
+def run_poll_notify(*, include_reset_notify: bool = False) -> None:
+    print("Telegram usage polling started. Press Ctrl+C to stop.", flush=True)
+
+    while True:
+        started = time.monotonic()
+        ok, detail = run_usage_sync()
+        if not ok:
+            print(f"Usage sync failed before notify: {detail}", flush=True)
+        else:
+            run_notify()
+            if include_reset_notify:
+                run_reset_notify()
+
+        elapsed = time.monotonic() - started
+        time.sleep(max(1.0, POLL_INTERVAL_SECONDS - elapsed))
+
+
+def run_telegram() -> None:
+    poll_thread = threading.Thread(
+        target=run_poll_notify,
+        kwargs={"include_reset_notify": True},
+        daemon=True,
+    )
+    poll_thread.start()
+    run_bot()
 
 
 def freshness_note(success: bool, message: str) -> str:
@@ -516,12 +704,14 @@ def run_bot() -> None:
 def usage() -> str:
     return "\n".join(
         [
-            "Usage: scripts/telegram.py [notify|reset-notify|bot]",
+            "Usage: scripts/telegram.py [notify|poll-notify|reset-notify|bot|telegram]",
             "",
             "Commands:",
-            "  notify        Disabled compatibility command.",
+            "  notify        Send usage-change notifications once.",
+            "  poll-notify   Sync and check usage-change notifications every 5 minutes.",
             "  reset-notify  Send reset notifications once.",
             "  bot           Run the interactive Telegram bot.",
+            "  telegram      Run the interactive bot and usage polling together.",
         ]
     )
 
@@ -535,11 +725,17 @@ def main() -> None:
     if command == "notify":
         run_notify()
         return
+    if command == "poll-notify":
+        run_poll_notify()
+        return
     if command == "reset-notify":
         run_reset_notify()
         return
     if command == "bot":
         run_bot()
+        return
+    if command == "telegram":
+        run_telegram()
         return
 
     raise SystemExit(usage())

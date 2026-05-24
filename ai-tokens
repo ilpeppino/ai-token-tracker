@@ -25,6 +25,7 @@ case "${1:-dashboard}" in
     echo "  ai-tokens sync"
     echo "    (refreshes/dumps browser tabs, syncs usage, percentages, calibration + forecast views)"
     echo "  ai-tokens notify"
+    echo "  ai-tokens poll-notify"
     echo "  ai-tokens reset-notify"
     echo "  ai-tokens bot"
     echo "  ai-tokens telegram"
@@ -55,18 +56,12 @@ case "${1:-dashboard}" in
     "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
     "$PY" "$SCRIPTS/build-calibration-view.py" || true
     "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
+    "$PY" "$SCRIPTS/telegram.py" notify
     "$PY" "$SCRIPTS/telegram.py" reset-notify
     ;;
 
   telegram)
-    "$REFRESH_SCRIPT" || true
-    "$DUMP_SCRIPT" || true
-    "$PY" "$SCRIPTS/sync-usage.py"
-    "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
-    "$PY" "$SCRIPTS/build-calibration-view.py" || true
-    "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
-    "$PY" "$SCRIPTS/telegram.py" reset-notify
-    "$PY" "$SCRIPTS/telegram.py" bot
+    "$PY" "$SCRIPTS/telegram.py" telegram
     ;;
 
   dashboard)
@@ -80,7 +75,11 @@ case "${1:-dashboard}" in
     ;;
 
   notify)
-    echo "Usage-change Telegram notifications are disabled."
+    "$PY" "$SCRIPTS/telegram.py" notify
+    ;;
+
+  poll-notify)
+    "$PY" "$SCRIPTS/telegram.py" poll-notify
     ;;
 
   reset-notify)
@@ -112,6 +111,7 @@ case "${1:-dashboard}" in
     echo "  ai-tokens sync"
     echo "    (refreshes/dumps browser tabs, syncs usage, percentages, calibration + forecast views)"
     echo "  ai-tokens notify"
+    echo "  ai-tokens poll-notify"
     echo "  ai-tokens reset-notify"
     echo "  ai-tokens bot"
     echo "  ai-tokens telegram"

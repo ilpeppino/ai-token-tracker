@@ -62,10 +62,16 @@ Refresh usage dashboard tabs and scrape latest browser quota data:
 ai-tokens refresh
 ```
 
-Usage-change notifications are disabled. This compatibility command is a no-op:
+Check usage-change notifications manually:
 
 ```bash
 ai-tokens notify
+```
+
+Poll usage-change notifications every 5 minutes:
+
+```bash
+ai-tokens poll-notify
 ```
 
 Check reset notifications manually:
@@ -86,7 +92,7 @@ Run Telegram interactive bot:
 ai-tokens bot
 ```
 
-Run the full Telegram flow without the dashboard:
+Run the interactive bot with background usage polling every 5 minutes:
 
 ```bash
 ai-tokens telegram
@@ -114,8 +120,10 @@ Direct local scripts:
 ./scripts/sync-usage.py
 ./scripts/sync-usage-percentages.py
 ./scripts/telegram.py notify
+./scripts/telegram.py poll-notify
 ./scripts/telegram.py reset-notify
 ./scripts/telegram.py bot
+./scripts/telegram.py telegram
 ```
 
 ## Data Sources
@@ -371,7 +379,7 @@ Per run it executes:
 4. Sync browser quota snapshots
 5. Rebuild calibration estimates
 6. Rebuild quota forecast
-7. Send Telegram reset notifications
+7. Send Telegram usage-change and reset notifications
 
 Logs:
 
