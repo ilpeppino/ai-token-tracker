@@ -289,12 +289,12 @@ def status_line(row: sqlite3.Row, window: str) -> str:
         used = row["weekly_used_pct"]
 
     pct = clamp_percentage(used)
-    pct_text = "n/a" if pct is None else f"{pct:.0f}% used"
+    pct_text = "n/a" if pct is None else f"{pct:.0f}%"
     reset_at, reset_in = reset_parts(row, window)
     provider = USAGE_NOTIFY_LABELS.get(provider_name.lower(), provider_name.capitalize())
-    line = f"{provider:<7} {usage_dot_bar(used)} {pct_text:>9}"
-    if reset_at != "n/a" or reset_in != "n/a":
-        line += f" · ↺ {reset_at} · {reset_in}"
+    line = f"{provider:<7} {usage_dot_bar(used, width=8)} {pct_text:>4}"
+    if reset_at != "n/a":
+        line += f" · ↺ {reset_at}"
     return line
 
 
