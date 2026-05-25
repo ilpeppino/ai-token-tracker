@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -29,6 +30,8 @@ BOT_STATE_PATH = PROJECT_DIR / ".telegram-bot-state.json"
 STATUS_REFRESH_TIMEOUT_SECONDS = 90
 POLL_INTERVAL_SECONDS = 5 * 60
 USAGE_WARNING_THRESHOLD_PCT = 90.0
+TELEGRAM_LONG_POLL_TIMEOUT_SECONDS = 25
+TELEGRAM_HTTP_TIMEOUT_BUFFER_SECONDS = 10
 
 PROVIDER_ICONS = {
     "codex": "🤖",
@@ -676,7 +679,20 @@ def run_bot() -> None:
     print("Telegram bot polling started. Press Ctrl+C to stop.")
 
     while True:
-        updates = telegram_api(token, "getUpdates", {"offset": offset, "timeout": 25})
+        try:
+            updates = telegram_api(
+                token,
+                "getUpdates",
+                {"offset": offset, "timeout": TELEGRAM_LONG_POLL_TIMEOUT_SECONDS},
+                timeout=(
+                    TELEGRAM_LONG_POLL_TIMEOUT_SECONDS
+                    + TELEGRAM_HTTP_TIMEOUT_BUFFER_SECONDS
+                ),
+            )
+        except (TimeoutError, urllib.error.URLError) as exc:
+            print(f"Telegram getUpdates failed, retrying: {exc}", flush=True)
+            time.sleep(5)
+            continue
 
         for update in updates.get("result", []):
             offset = max(offset, int(update["update_id"]) + 1)
