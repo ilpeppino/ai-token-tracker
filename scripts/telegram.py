@@ -385,15 +385,22 @@ def read_forecast_rows(provider: str | None = None) -> list[sqlite3.Row]:
         conn.close()
 
 
+def usage_detail_lines(details: list[tuple[str, str]]) -> list[str]:
+    label_width = max(len(label) for label, _ in details)
+    return [f"{label + ':':<{label_width + 1}} {value}" for label, value in details]
+
+
 def build_usage_change_message(provider: str, used_pct: float, reset_at: Any) -> str:
     return "\n".join(
         [
             f"{usage_notify_label(provider)} 5-hour usage changed",
             "",
-            f"Used: {used_pct:.0f}%",
-            f"Next reset: {fmt_datetime(reset_at)}",
-            "",
-            "AI Token Tracker",
+            *usage_detail_lines(
+                [
+                    ("Used", f"{used_pct:.0f}%"),
+                    ("Next reset", fmt_datetime(reset_at)),
+                ]
+            ),
         ]
     )
 
@@ -403,23 +410,30 @@ def build_usage_warning_message(provider: str, used_pct: float, reset_at: Any) -
         [
             f"⚠️ {usage_notify_label(provider)} usage is depleted",
             "",
-            f"Used: {used_pct:.0f}%",
-            f"Next reset: {fmt_datetime(reset_at)}",
-            "",
-            "AI Token Tracker",
+            *usage_detail_lines(
+                [
+                    ("Used", f"{used_pct:.0f}%"),
+                    ("Next reset", fmt_datetime(reset_at)),
+                ]
+            ),
         ]
     )
 
 
 def build_usage_available_message(provider: str, reset_at: Any) -> str:
+    banner = "🟩🟩🟩 AVAILABLE 🟩🟩🟩"
     return "\n".join(
         [
-            f"✅ {usage_notify_label(provider)} is available again",
+            banner,
+            f"✅ {provider_label(provider)} is available again",
+            banner,
             "",
             "5-hour usage has reset to 0%.",
-            f"Reset time: {fmt_datetime(reset_at)}",
-            "",
-            "AI Token Tracker",
+            *usage_detail_lines(
+                [
+                    ("Reset time", fmt_datetime(reset_at)),
+                ]
+            ),
         ]
     )
 
