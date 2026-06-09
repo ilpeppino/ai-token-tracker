@@ -7,7 +7,7 @@ cd "$BASE"
 OUT_DIR="$BASE/usage-dumps"
 mkdir -p "$OUT_DIR"
 
-osascript "$OUT_DIR" <<'APPLESCRIPT'
+osascript - "$OUT_DIR" <<'APPLESCRIPT'
 on run argv
 set outDir to item 1 of argv
 
@@ -18,7 +18,7 @@ tell application "Google Chrome"
     repeat with t in tabs of w
       set tabUrl to URL of t
 
-      if tabUrl contains "chatgpt.com/codex/cloud/settings/analytics" or tabUrl contains "claude.ai/settings/usage" then
+      if tabUrl contains "chatgpt.com/codex/cloud/settings/analytics" or (tabUrl contains "claude.ai" and (tabUrl contains "settings/usage" or tabUrl contains "settings/plan")) then
         set foundCount to foundCount + 1
 
         set tabTitle to title of t

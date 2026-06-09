@@ -508,7 +508,6 @@ def build_reset_message(provider: str, window_label: str, reset_at: str) -> str:
             "You can start using it again.",
             f"Reset time: {fmt_datetime(reset_at)}",
             "",
-            "AI Token Tracker",
         ]
     )
 
