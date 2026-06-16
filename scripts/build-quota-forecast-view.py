@@ -16,6 +16,22 @@ def main() -> None:
     try:
         conn.execute("DROP VIEW IF EXISTS quota_forecast")
 
+        calibration_exists = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM sqlite_master
+            WHERE type = 'view'
+              AND name = 'calibration_estimates'
+            """
+        ).fetchone()[0] > 0
+
+        if not calibration_exists:
+            conn.commit()
+            raise SystemExit(
+                "Missing required database object: calibration_estimates. "
+                "Run scripts/sync-usage-percentages.py and scripts/build-calibration-view.py first."
+            )
+
         conn.execute("""
         CREATE VIEW quota_forecast AS
         WITH latest AS (

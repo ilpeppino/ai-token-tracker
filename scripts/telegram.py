@@ -308,6 +308,17 @@ def read_forecast_rows(provider: str | None = None) -> list[sqlite3.Row]:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
+        forecast_exists = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM sqlite_master
+            WHERE type = 'view'
+              AND name = 'quota_forecast'
+            """
+        ).fetchone()[0] > 0
+        if not forecast_exists:
+            return []
+
         where = ""
         args: tuple[Any, ...] = ()
         if provider:
@@ -381,6 +392,10 @@ def read_forecast_rows(provider: str | None = None) -> list[sqlite3.Row]:
             """,
             args,
         ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "calibration_estimates" in str(exc) or "quota_forecast" in str(exc):
+            return []
+        raise
     finally:
         conn.close()
 
