@@ -639,7 +639,9 @@ def notify_for_usage_row(
 
     if rounded_used == 0:
         if previous_used is not None and float(previous_used) > 0:
-            should_send = True
+            # Skip here when run_reset_notify will send the same card
+            if row["five_hour_reset_status"] != "known_reset":
+                should_send = True
         provider_state["five_hour_warning_sent"] = False
     elif rounded_used >= USAGE_WARNING_THRESHOLD_PCT and not previous_warning_sent:
         should_send = True
