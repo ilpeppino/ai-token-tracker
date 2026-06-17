@@ -21,13 +21,19 @@ DUMP_DIR = PROJECT_DIR / "usage-dumps"
 CHROME_CDP_URL = os.environ.get("AI_TOKENS_CHROME_CDP_URL", "http://127.0.0.1:9222")
 
 TARGETS = {
-    "codex": "chatgpt.com/codex/cloud/settings/analytics",
-    "claude": "claude.ai/settings/usage",
+    "codex": ["chatgpt.com/codex/cloud/settings/analytics"],
+    "claude": ["claude.ai/settings/usage", "claude.ai/new#settings/usage"],
 }
 
 PAGE_MARKERS = {
     "codex": "Codex Analytics",
     "claude": "Plan Usage Limits",
+}
+
+# Strings that must appear in the page body for the dump to be considered valid.
+CONTENT_CHECKS = {
+    "codex": ["codex analytics"],
+    "claude": ["plan usage limits"],
 }
 
 
@@ -60,7 +66,8 @@ def normalize_url(url: str) -> str:
 
 
 def page_matches(name: str, url: str) -> bool:
-    return TARGETS[name] in normalize_url(url)
+    normalized = normalize_url(url)
+    return any(pattern in normalized for pattern in TARGETS[name])
 
 
 def iter_existing_pages(browser) -> Iterable[tuple[str, Any]]:
@@ -85,7 +92,16 @@ def scrape_page(name: str, page) -> Path:
 
     lowered = text.lower()
     if "log in" in lowered or "sign in" in lowered or "continue with google" in lowered:
-        print(f"{name}: login page detected in existing tab; dump still written for inspection.", flush=True)
+        print(f"WARNING {name}: login page detected — tab may not be authenticated.", flush=True)
+
+    for check in CONTENT_CHECKS[name]:
+        if check not in lowered:
+            print(
+                f"WARNING {name}: expected content '{check}' not found in page body. "
+                f"Tab may have navigated away or shows wrong content.",
+                flush=True,
+            )
+            break
 
     dump_file = write_dump(name, url, text)
     print(f"{name}: wrote {dump_file}", flush=True)

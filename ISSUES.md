@@ -5,6 +5,8 @@
 
   pkill chrome || pkill google-chrome || true
   google-chrome --remote-debugging-port=9222
+  or
+  google-chrome --remote-debugging-port=9222 -user-data-dir=Profile 1
 
   Then, in that Chrome instance:
 

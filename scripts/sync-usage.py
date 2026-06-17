@@ -5,7 +5,7 @@
 This script is the canonical local ingestion layer for AI Token Tracker.
 
 It reads:
-- Claude Code usage snapshots from ~/.claude/token-usage.jsonl
+- Claude Code usage snapshots from ~/.claude/projects/**/<session>.jsonl
 - Codex CLI thread usage from ~/.codex/state_5.sqlite
 
 It writes normalized rows into usage_sessions.
@@ -36,7 +36,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_DIR / "usage.sqlite"
 
 CLAUDE_DIR = HOME / ".claude"
-CLAUDE_TOKEN_LOG = CLAUDE_DIR / "token-usage.jsonl"
+CLAUDE_PROJECTS_DIR = CLAUDE_DIR / "projects"
 
 CODEX_DB = HOME / ".codex" / "state_5.sqlite"
 
@@ -262,103 +262,132 @@ def insert_session_snapshot(conn: sqlite3.Connection, row: dict[str, Any]) -> No
     )
 
 
-def load_latest_claude_snapshots() -> dict[str, dict[str, Any]]:
-    """Load the latest Claude usage snapshot per session id."""
-    latest_by_session: dict[str, dict[str, Any]] = {}
+def cwd_from_project_dir(dir_name: str) -> str:
+    """Decode a Claude project directory name back to its filesystem path.
 
-    if not CLAUDE_TOKEN_LOG.exists():
-        return latest_by_session
+    Claude Code encodes the cwd by stripping the leading '/' and replacing
+    all '/' with '-'.  This is ambiguous when directory names contain '-'.
+    We resolve ambiguity by recursively checking which candidate paths
+    actually exist on disk.
+    """
+    if not dir_name.startswith("-"):
+        return dir_name
 
-    with CLAUDE_TOKEN_LOG.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
+    parts = dir_name[1:].split("-")
 
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    def find_paths(i: int, current: str) -> list[str]:
+        if i == len(parts):
+            return [current]
+        results: list[str] = []
+        for j in range(i + 1, len(parts) + 1):
+            component = "-".join(parts[i:j])
+            candidate = current + "/" + component
+            if j == len(parts):
+                results.append(candidate)
+            elif Path(candidate).is_dir():
+                results.extend(find_paths(j, candidate))
+        return results
 
-            sid = entry.get("session_id")
-            ts = entry.get("timestamp")
-
-            if not sid or not ts:
-                continue
-
-            current = latest_by_session.get(sid)
-            if current is None or ts > current.get("timestamp", ""):
-                latest_by_session[sid] = entry
-
-    return latest_by_session
+    paths = find_paths(0, "")
+    existing = [p for p in paths if Path(p).exists()]
+    if existing:
+        # Prefer the path with the most hyphens (fewest path components — more
+        # parts were merged into hyphenated names, which is the common case).
+        return max(existing, key=lambda p: p.count("-"))
+    return paths[0] if paths else "/" + "/".join(parts)
 
 
 def sync_claude(conn: sqlite3.Connection) -> SyncResult:
-    if not CLAUDE_TOKEN_LOG.exists():
-        return SyncResult("claude", 0, False, CLAUDE_TOKEN_LOG)
+    if not CLAUDE_PROJECTS_DIR.exists():
+        return SyncResult("claude", 0, False, CLAUDE_PROJECTS_DIR)
 
     latest_by_session: dict[str, dict[str, Any]] = {}
     synced_snapshots = 0
 
-    with CLAUDE_TOKEN_LOG.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
+    for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+
+        cwd = cwd_from_project_dir(project_dir.name)
+
+        for session_file in project_dir.glob("*.jsonl"):
+            session_id = session_file.stem
+            first_ts: str | None = None
+            last_ts: str | None = None
+            total_input = total_output = total_cache_read = total_cache_write = 0
+            model: str | None = None
 
             try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
+                with session_file.open(errors="replace") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        ts = obj.get("timestamp")
+                        if ts:
+                            if first_ts is None:
+                                first_ts = ts
+                            if last_ts is None or ts > last_ts:
+                                last_ts = ts
+
+                        if obj.get("type") == "assistant":
+                            msg = obj.get("message", {})
+                            if isinstance(msg, dict):
+                                usage = msg.get("usage", {})
+                                if usage:
+                                    total_input += as_int(usage.get("input_tokens"))
+                                    total_output += as_int(usage.get("output_tokens"))
+                                    total_cache_read += as_int(usage.get("cache_read_input_tokens"))
+                                    total_cache_write += as_int(usage.get("cache_creation_input_tokens"))
+                                    if not model:
+                                        model = msg.get("model")
+            except (OSError, IOError):
                 continue
 
-            sid = entry.get("session_id")
-            ts = entry.get("timestamp")
-
-            if not sid or not ts:
+            if first_ts is None:
                 continue
 
-            cwd = entry.get("cwd", "")
-
-            input_tokens = as_int(entry.get("input_tokens"))
-            output_tokens = as_int(entry.get("output_tokens"))
-            cache_write = as_int(entry.get("cache_creation_input_tokens"))
-            cache_read = as_int(entry.get("cache_read_input_tokens"))
-
-            main_total = input_tokens + output_tokens
-            full_total = input_tokens + output_tokens + cache_read + cache_write
+            ts = last_ts or first_ts
+            main_total = total_input + total_output
+            full_total = total_input + total_output + total_cache_read + total_cache_write
 
             row = {
                 "tool": "claude",
-                "session_id": sid,
+                "session_id": session_id,
                 "date": timestamp_day(ts),
                 "timestamp": ts,
                 "project": project_from_cwd(cwd),
                 "cwd": cwd,
-                "model": entry.get("model") or "sonnet-4.6",
-                "reasoning_effort": entry.get("reasoning_effort") or "",
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_tokens": cache_read,
-                "cache_write_tokens": cache_write,
+                "model": model or "unknown",
+                "reasoning_effort": "",
+                "input_tokens": total_input,
+                "output_tokens": total_output,
+                "cache_read_tokens": total_cache_read,
+                "cache_write_tokens": total_cache_write,
                 "main_total_tokens": main_total,
                 "full_total_tokens": full_total,
                 "reported_total_tokens": main_total,
-                "cost_usd": claude_cost(input_tokens, output_tokens, cache_read, cache_write),
+                "cost_usd": claude_cost(total_input, total_output, total_cache_read, total_cache_write),
                 "live": 0,
             }
 
             insert_session_snapshot(conn, row)
             synced_snapshots += 1
 
-            current = latest_by_session.get(sid)
+            current = latest_by_session.get(session_id)
             if current is None or ts > current.get("timestamp", ""):
-                latest_by_session[sid] = row
+                latest_by_session[session_id] = row
 
     for row in latest_by_session.values():
         upsert_session(conn, row)
 
     conn.commit()
-    return SyncResult("claude", synced_snapshots, True, CLAUDE_TOKEN_LOG)
+    return SyncResult("claude", synced_snapshots, True, CLAUDE_PROJECTS_DIR)
 
 
 def sync_codex(conn: sqlite3.Connection) -> SyncResult:
