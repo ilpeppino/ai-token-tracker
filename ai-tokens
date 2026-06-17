@@ -14,8 +14,19 @@ cd "$BASE"
 SCRIPTS="$BASE/scripts"
 PY="$BASE/.venv/bin/python"
 STREAMLIT="$BASE/.venv/bin/streamlit"
-DUMP_SCRIPT="$SCRIPTS/read-open-usage-tabs.sh"
-REFRESH_SCRIPT="$SCRIPTS/refresh-usage-tabs.sh"
+
+run_browser_scraper() {
+  "$PY" "$SCRIPTS/usage-page-scrape.py" all
+}
+
+run_browser_pipeline() {
+  if ! run_browser_scraper; then
+    echo "Browser scrape failed; continuing with existing dumps if any."
+  fi
+  "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
+  "$PY" "$SCRIPTS/build-calibration-view.py" || true
+  "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
+}
 
 case "${1:-dashboard}" in
   help|-h|--help)
@@ -29,6 +40,7 @@ case "${1:-dashboard}" in
     echo "  ai-tokens reset-notify"
     echo "  ai-tokens bot"
     echo "  ai-tokens telegram"
+    echo "  ai-tokens service"
     echo "  ai-tokens sync-notify"
     echo "  ai-tokens export"
     echo "  ai-tokens stats today"
@@ -36,26 +48,17 @@ case "${1:-dashboard}" in
     ;;
 
   refresh)
-    "$REFRESH_SCRIPT" || true
-    "$DUMP_SCRIPT" || true
+    run_browser_scraper || true
     ;;
 
   sync)
-    "$REFRESH_SCRIPT" || true
-    "$DUMP_SCRIPT" || true
     "$PY" "$SCRIPTS/sync-usage.py"
-    "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
-    "$PY" "$SCRIPTS/build-calibration-view.py" || true
-    "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
+    run_browser_pipeline
     ;;
 
   sync-notify)
-    "$REFRESH_SCRIPT" || true
-    "$DUMP_SCRIPT" || true
     "$PY" "$SCRIPTS/sync-usage.py"
-    "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
-    "$PY" "$SCRIPTS/build-calibration-view.py" || true
-    "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
+    run_browser_pipeline
     "$PY" "$SCRIPTS/telegram.py" notify
     "$PY" "$SCRIPTS/telegram.py" reset-notify
     ;;
@@ -64,13 +67,13 @@ case "${1:-dashboard}" in
     "$PY" "$SCRIPTS/telegram.py" telegram
     ;;
 
+  service)
+    "$PY" "$SCRIPTS/telegram.py" service
+    ;;
+
   dashboard)
-    "$REFRESH_SCRIPT" || true
-    "$DUMP_SCRIPT" || true
     "$PY" "$SCRIPTS/sync-usage.py"
-    "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
-    "$PY" "$SCRIPTS/build-calibration-view.py" || true
-    "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
+    run_browser_pipeline
     "$STREAMLIT" run "$SCRIPTS/dashboard.py" --server.headless=false
     ;;
 
@@ -91,12 +94,8 @@ case "${1:-dashboard}" in
     ;;
 
   export)
-    "$REFRESH_SCRIPT" || true
-    "$DUMP_SCRIPT" || true
     "$PY" "$SCRIPTS/sync-usage.py"
-    "$PY" "$SCRIPTS/sync-usage-percentages.py" || true
-    "$PY" "$SCRIPTS/build-calibration-view.py" || true
-    "$PY" "$SCRIPTS/build-quota-forecast-view.py" || true
+    run_browser_pipeline
     "$PY" "$SCRIPTS/export-usage.py"
     ;;
 
@@ -115,6 +114,7 @@ case "${1:-dashboard}" in
     echo "  ai-tokens reset-notify"
     echo "  ai-tokens bot"
     echo "  ai-tokens telegram"
+    echo "  ai-tokens service"
     echo "  ai-tokens sync-notify"
     echo "  ai-tokens export"
     echo "  ai-tokens stats today"

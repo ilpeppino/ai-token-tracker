@@ -1,104 +1,140 @@
 #!/usr/bin/env python3
-import re
+"""Scrape authenticated browser usage pages into local dump files.
+
+This is the Linux-capable replacement for the old AppleScript-based browser
+pipeline. It uses Playwright to open the authenticated pages, reads the visible
+body text, and writes the result to usage-dumps/*.txt for the existing parser.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-BASE = Path.home() / ".ai-token-tracker"
-PROFILE_DIR = str(BASE / "browser-profile")
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+DUMP_DIR = PROJECT_DIR / "usage-dumps"
+PROFILE_DIR = Path(os.environ.get("AI_TOKENS_BROWSER_PROFILE_DIR", Path.home() / ".ai-token-tracker" / "browser-profile"))
+HEADLESS_ENV = os.environ.get("AI_TOKENS_BROWSER_HEADLESS")
 
 PAGES = {
     "codex": "https://chatgpt.com/codex/cloud/settings/analytics",
     "claude": "https://claude.ai/settings/usage",
 }
 
-def extract_percentages(text: str):
-    matches = re.findall(r"(\d{1,3}(?:\.\d+)?)\s*%", text)
-    values = []
-    for m in matches:
-        try:
-            v = float(m)
-            if 0 <= v <= 100:
-                values.append(v)
-        except ValueError:
-            pass
-    return values
+PAGE_MARKERS = {
+    "codex": "Codex Analytics",
+    "claude": "Plan Usage Limits",
+}
 
-def guess_usage_labels(text: str):
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    interesting = []
 
-    for i, line in enumerate(lines):
-        low = line.lower()
-        if "%" in line or "5-hour" in low or "5 hour" in low or "weekly" in low or "week" in low or "usage" in low or "limit" in low:
-            context = lines[max(0, i - 2): min(len(lines), i + 3)]
-            interesting.append(" | ".join(context))
+def dump_path_for(name: str) -> Path:
+    return DUMP_DIR / f"{name.capitalize()}.txt"
 
-    return interesting[:30]
 
-def scrape(page, name, url):
-    print(f"\n=== {name.upper()} ===")
-    print(f"URL: {url}")
+def resolve_headless() -> bool:
+    if HEADLESS_ENV is not None:
+        return HEADLESS_ENV.strip().lower() not in {"0", "false", "no", "off"}
+    return not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
+
+def detect_executable_path() -> str | None:
+    for candidate in (
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "chrome",
+    ):
+        path = shutil.which(candidate)
+        if path:
+            return path
+    return None
+
+
+def write_dump(name: str, url: str, text: str) -> Path:
+    DUMP_DIR.mkdir(parents=True, exist_ok=True)
+    observed_at = datetime.now(timezone.utc).isoformat()
+    output = dump_path_for(name)
+    output.write_text(
+        "\n".join(
+            [
+                f"# provider={name}",
+                f"# marker={PAGE_MARKERS[name]}",
+                f"# url={url}",
+                f"# observed_at={observed_at}",
+                "",
+                text.strip(),
+                "",
+            ]
+        )
+    )
+    return output
+
+
+def scrape_page(page, name: str, url: str) -> Path:
+    print(f"Scraping {name}: {url}", flush=True)
     page.goto(url, wait_until="networkidle", timeout=60000)
     page.wait_for_timeout(3000)
 
-    text = page.locator("body").inner_text(timeout=30000)
+    try:
+        text = page.locator("body").inner_text(timeout=30000)
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError(f"{name}: failed to read page text: {exc}") from exc
 
-    if "log in" in text.lower() or "sign in" in text.lower():
-        print("Looks like you may need to log in in the opened browser window.")
-        print("After logging in, rerun this script.")
-        return
+    lowered = text.lower()
+    if "log in" in lowered or "sign in" in lowered or "continue with google" in lowered:
+        print(f"{name}: login page detected; dump still written for inspection.", flush=True)
 
-    percentages = extract_percentages(text)
+    dump_file = write_dump(name, url, text)
+    print(f"{name}: wrote {dump_file}", flush=True)
+    return dump_file
 
-    print("\nPercentages found:")
-    if percentages:
-        for p in percentages:
-            print(f"  {p:g}%")
-    else:
-        print("  none found")
 
-    print("\nRelevant text snippets:")
-    snippets = guess_usage_labels(text)
-    if snippets:
-        for s in snippets:
-            print(f"  - {s[:500]}")
-    else:
-        print("  no obvious usage snippets found")
-
-def main():
+def main() -> None:
     provider = sys.argv[1].lower() if len(sys.argv) > 1 else "all"
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            PROFILE_DIR,
-            headless=False,
-            viewport={"width": 1440, "height": 1000},
+    if provider not in {"all", "codex", "claude"}:
+        raise SystemExit("Usage: scripts/usage-page-scrape.py [all|codex|claude]")
+
+    targets = PAGES.items() if provider == "all" else [(provider, PAGES[provider])]
+
+    executable_path = detect_executable_path()
+    if executable_path is None:
+        print(
+            "No Chrome/Chromium binary found on PATH. Install Google Chrome or Chromium, "
+            "or provide a Playwright browser with `python -m playwright install chromium`.",
+            file=sys.stderr,
         )
 
-        page = browser.new_page()
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
-        if provider == "all":
-            targets = PAGES.items()
-        elif provider in PAGES:
-            targets = [(provider, PAGES[provider])]
-        else:
-            print("Usage: scripts/usage-page-scrape.py [all|codex|claude]")
+    with sync_playwright() as p:
+        launch_kwargs = {
+            "headless": resolve_headless(),
+            "viewport": {"width": 1440, "height": 1000},
+        }
+        if executable_path is not None:
+            launch_kwargs["executable_path"] = executable_path
+
+        browser = p.chromium.launch_persistent_context(str(PROFILE_DIR), **launch_kwargs)
+        try:
+            page = browser.new_page()
+            for name, url in targets:
+                try:
+                    scrape_page(page, name, url)
+                except Exception as exc:
+                    print(f"{name}: failed: {exc}", file=sys.stderr)
+        finally:
             browser.close()
-            sys.exit(1)
 
-        for name, url in targets:
-            try:
-                scrape(page, name, url)
-            except Exception as e:
-                print(f"\n{name}: failed: {e}")
+    print("Done.")
 
-        print("\nDone.")
-        print("If login was required, complete login in the opened browser, then rerun:")
-        print("  python scripts/usage-page-scrape.py all")
-
-        browser.close()
 
 if __name__ == "__main__":
     main()

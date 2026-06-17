@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
+import signal
 import threading
 import time
 import urllib.error
@@ -62,6 +64,67 @@ PROVIDER_ICONS = {
     "codex": "⚪",
     "claude": "✳️",
 }
+
+STOP_EVENT = threading.Event()
+
+
+def configured_command(env_name: str) -> list[str] | None:
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return None
+    return shlex.split(raw)
+
+
+def default_refresh_command() -> list[str] | None:
+    return [str(AI_TOKENS_SCRIPT), "sync"]
+
+
+def telegram_refresh_command() -> list[str] | None:
+    return configured_command("AI_TOKENS_TELEGRAM_REFRESH_COMMAND") or default_refresh_command()
+
+
+def telegram_poll_sync_command() -> list[str] | None:
+    return configured_command("AI_TOKENS_TELEGRAM_SYNC_COMMAND") or default_refresh_command()
+
+
+def run_command(command: list[str], *, timeout: int) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(PROJECT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"{command[0]} timed out after {timeout}s"
+    except Exception as exc:
+        return False, f"{command[0]} failed: {exc}"
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "unknown error").strip()
+        if len(detail) > 500:
+            detail = detail[:500] + "…"
+        return False, detail
+
+    output = (result.stdout or "").strip()
+    if not output:
+        output = f"{command[0]} complete"
+    return True, output
+
+
+def install_signal_handlers() -> None:
+    def _handle_signal(signum: int, frame: Any) -> None:
+        STOP_EVENT.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _handle_signal)
+        except Exception:
+            pass
+
+
 def telegram_api_multipart(
     token: str,
     method: str,
@@ -113,6 +176,8 @@ def telegram_api_multipart(
 
 def resized_telegram_image_path(image_path: Path) -> Path:
     return image_path
+
+
 def send_photo_message(
     token: str,
     chat_id: str | int,
@@ -141,6 +206,8 @@ def send_photo_message(
         {"photo": image_path},
         timeout=30,
     )
+
+
 def provider_image_path(provider: str) -> Path:
     key = provider.lower()
     svg_path = ASSETS_DIR / f"{key}.svg"
@@ -174,6 +241,8 @@ def load_provider_icon(provider: str, max_size: int) -> Any | None:
 
     icon.thumbnail((max_size, max_size))
     return icon
+
+
 def reset_summary(row: sqlite3.Row, window: str) -> str:
     reset_at, reset_in = reset_parts(row, window)
     if reset_at == "n/a" and reset_in == "n/a":
@@ -546,9 +615,6 @@ def usage_detail_lines(details: list[tuple[str, str]]) -> list[str]:
     label_width = max(len(label) for label, _ in details)
     return [f"{label + ':':<{label_width + 1}} {value}" for label, value in details]
 
-
-
-
 def notify_for_usage_row(
     token: str,
     chat_id: str,
@@ -648,6 +714,8 @@ def run_reset_notify() -> None:
 
     print(f"Reset notifications sent: {sent}")
     print(f"Known future resets pending: {pending}")
+
+
 def card_font(size: int, *, bold: bool = False) -> Any:
     if ImageFont is None:
         return None
@@ -912,55 +980,32 @@ def send_status_cards(
 
 
 def refresh_usage_before_status() -> tuple[bool, str]:
-    try:
-        result = subprocess.run(
-            [str(AI_TOKENS_SCRIPT), "sync"],
-            cwd=str(PROJECT_DIR),
-            capture_output=True,
-            text=True,
-            timeout=STATUS_REFRESH_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return False, f"Refresh timed out after {STATUS_REFRESH_TIMEOUT_SECONDS}s. Showing last cached data."
-    except Exception as exc:
-        return False, f"Refresh failed: {escape(str(exc))}. Showing last cached data."
+    command = telegram_refresh_command()
+    if command is None:
+        return False, "Using cached local data."
 
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "unknown error").strip()
-        if len(detail) > 240:
-            detail = detail[:240] + "…"
-        return False, f"Refresh failed. Showing last cached data. <code>{escape(detail)}</code>"
+    ok, detail = run_command(command, timeout=STATUS_REFRESH_TIMEOUT_SECONDS)
+    if ok:
+        return True, "Refreshed just now."
 
-    return True, "Refreshed just now."
+    detail = detail.strip()
+    if len(detail) > 240:
+        detail = detail[:240] + "…"
+    return False, f"Sync failed. Showing last cached data. <code>{escape(detail)}</code>"
 
 
 def run_usage_sync() -> tuple[bool, str]:
-    try:
-        result = subprocess.run(
-            [str(AI_TOKENS_SCRIPT), "sync"],
-            cwd=str(PROJECT_DIR),
-            capture_output=True,
-            text=True,
-            timeout=STATUS_REFRESH_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return False, f"sync timed out after {STATUS_REFRESH_TIMEOUT_SECONDS}s"
-    except Exception as exc:
-        return False, f"sync failed: {exc}"
+    command = telegram_poll_sync_command()
+    if command is None:
+        return True, "Sync skipped on this platform."
 
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "unknown error").strip()
-        return False, detail[:500]
-
-    return True, "sync complete"
+    return run_command(command, timeout=STATUS_REFRESH_TIMEOUT_SECONDS)
 
 
 def run_poll_notify(*, include_reset_notify: bool = False) -> None:
     print("Telegram usage polling started. Press Ctrl+C to stop.", flush=True)
 
-    while True:
+    while not STOP_EVENT.is_set():
         started = time.monotonic()
         ok, detail = run_usage_sync()
         if not ok:
@@ -971,10 +1016,12 @@ def run_poll_notify(*, include_reset_notify: bool = False) -> None:
                 run_reset_notify()
 
         elapsed = time.monotonic() - started
-        time.sleep(max(1.0, POLL_INTERVAL_SECONDS - elapsed))
+        remaining = max(1.0, POLL_INTERVAL_SECONDS - elapsed)
+        STOP_EVENT.wait(remaining)
 
 
 def run_telegram() -> None:
+    install_signal_handlers()
     poll_thread = threading.Thread(
         target=run_poll_notify,
         kwargs={"include_reset_notify": True},
@@ -985,11 +1032,23 @@ def run_telegram() -> None:
 
 
 def freshness_note(success: bool, message: str) -> str:
-    return ""
+    if not message:
+        return ""
+    return message
 
 
 def build_status(provider: str | None = None, refresh_note: str | None = None) -> str:
-    return TELEGRAM_CARD_RENDER_ERROR
+    rows = read_forecast_rows(provider)
+    if not rows:
+        return "No forecast data found. Run ai-tokens sync first."
+
+    lines: list[str] = []
+    if refresh_note:
+        lines.append(refresh_note)
+    for row in rows:
+        lines.append(status_line(row, "five_hour"))
+        lines.append(status_line(row, "weekly"))
+    return "\n".join(lines)
 
 
 def help_text() -> str:
@@ -997,10 +1056,10 @@ def help_text() -> str:
         [
             "<b>AI Token Tracker commands</b>",
             "",
-            "<code>/status</code> - Refresh, then show Codex + Claude status",
+            "<code>/status</code> - Show Codex + Claude status",
             "<code>/forecast</code> - Same as status",
-            "<code>/codex</code> - Refresh, then show Codex only",
-            "<code>/claude</code> - Refresh, then show Claude only",
+            "<code>/codex</code> - Show Codex only",
+            "<code>/claude</code> - Show Claude only",
             "<code>/help</code> - Command list",
         ]
     )
@@ -1038,7 +1097,7 @@ def run_bot() -> None:
 
     print("Telegram bot polling started. Press Ctrl+C to stop.")
 
-    while True:
+    while not STOP_EVENT.is_set():
         try:
             updates = telegram_api(
                 token,
@@ -1074,25 +1133,27 @@ def run_bot() -> None:
 
             handle_command(token, chat_id, text)
 
-        time.sleep(1)
+        STOP_EVENT.wait(1)
 
 
 def usage() -> str:
     return "\n".join(
         [
-            "Usage: scripts/telegram.py [notify|poll-notify|reset-notify|bot|telegram]",
+            "Usage: scripts/telegram.py [notify|poll-notify|reset-notify|bot|telegram|service]",
             "",
             "Commands:",
             "  notify        Send usage-change notifications once.",
-            "  poll-notify   Sync and check usage-change notifications every 5 minutes.",
+            "  poll-notify   Check usage-change notifications every 5 minutes.",
             "  reset-notify  Send reset notifications once.",
             "  bot           Run the interactive Telegram bot.",
             "  telegram      Run the interactive bot and usage polling together.",
+            "  service       Alias for telegram, intended for systemd.",
         ]
     )
 
 
 def main() -> None:
+    install_signal_handlers()
     command = sys.argv[1] if len(sys.argv) > 1 else "bot"
 
     if command in {"help", "-h", "--help"}:
@@ -1111,6 +1172,9 @@ def main() -> None:
         run_bot()
         return
     if command == "telegram":
+        run_telegram()
+        return
+    if command == "service":
         run_telegram()
         return
 
