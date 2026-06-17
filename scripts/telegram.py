@@ -11,13 +11,27 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from shutil import which
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:  # pragma: no cover - optional runtime dependency
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+
+try:
+    import cairosvg
+except Exception:  # pragma: no cover - optional runtime dependency
+    cairosvg = None
+
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+ASSETS_DIR = PROJECT_DIR / "assets"
 DB_PATH = PROJECT_DIR / "usage.sqlite"
 ENV_PATH = PROJECT_DIR / ".env"
 AI_TOKENS_SCRIPT = PROJECT_DIR / "ai-tokens"
@@ -26,6 +40,12 @@ LOCAL_TIMEZONE = ZoneInfo("Europe/Amsterdam")
 RESET_STATE_PATH = PROJECT_DIR / ".reset-notify-state.json"
 NOTIFY_STATE_PATH = PROJECT_DIR / ".notify-state.json"
 BOT_STATE_PATH = PROJECT_DIR / ".telegram-bot-state.json"
+TELEGRAM_UPLOAD_BOUNDARY = "----ai-token-tracker-boundary"
+TELEGRAM_IMAGE_SIZE_PX = 320
+TELEGRAM_RESIZED_ASSETS_DIR = PROJECT_DIR / ".telegram-assets"
+TELEGRAM_CARD_WIDTH = 1600
+TELEGRAM_CARD_HEIGHT = 320
+TELEGRAM_CARD_ICON_SIZE = 118
 
 STATUS_REFRESH_TIMEOUT_SECONDS = 90
 POLL_INTERVAL_SECONDS = 5 * 60
@@ -34,9 +54,128 @@ TELEGRAM_LONG_POLL_TIMEOUT_SECONDS = 25
 TELEGRAM_HTTP_TIMEOUT_BUFFER_SECONDS = 10
 
 PROVIDER_ICONS = {
-    "codex": "🤖",
-    "claude": "🧠",
+    "codex": "⚪",
+    "claude": "✳️",
 }
+def telegram_api_multipart(
+    token: str,
+    method: str,
+    fields: dict[str, Any],
+    files: dict[str, Path],
+    timeout: int = 30,
+) -> dict[str, Any]:
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    boundary = TELEGRAM_UPLOAD_BOUNDARY
+    body = bytearray()
+
+    for key, value in fields.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(
+            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode(
+                "utf-8"
+            )
+        )
+        body.extend(str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+
+    for key, path in files.items():
+        filename = path.name
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(
+            (
+                f'Content-Disposition: form-data; name="{key}"; '
+                f'filename="{filename}"\r\n'
+            ).encode("utf-8")
+        )
+        body.extend(b"Content-Type: image/png\r\n\r\n")
+        body.extend(path.read_bytes())
+        body.extend(b"\r\n")
+
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+
+    request = urllib.request.Request(
+        url,
+        data=bytes(body),
+        method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = response.read().decode("utf-8")
+        if response.status >= 300:
+            raise RuntimeError(payload)
+        return json.loads(payload)
+
+
+def resized_telegram_image_path(image_path: Path) -> Path:
+    return image_path
+def send_photo_message(
+    token: str,
+    chat_id: str | int,
+    image_path: Path,
+    caption: str,
+    *,
+    parse_mode: str | None = None,
+) -> None:
+    if not image_path.exists():
+        send_message(token, chat_id, caption, parse_mode=parse_mode)
+        return
+
+    upload_path = resized_telegram_image_path(image_path)
+
+    fields: dict[str, Any] = {
+        "chat_id": str(chat_id),
+    }
+    if caption:
+        fields["caption"] = caption
+    if parse_mode:
+        fields["parse_mode"] = parse_mode
+
+    telegram_api_multipart(
+        token,
+        "sendPhoto",
+        fields,
+        {"photo": upload_path},
+        timeout=30,
+    )
+def provider_image_path(provider: str) -> Path:
+    key = provider.lower()
+    svg_path = ASSETS_DIR / f"{key}.svg"
+    if svg_path.exists():
+        return svg_path
+    return ASSETS_DIR / f"{key}.png"
+
+
+# Load provider icon, supporting SVG and PNG
+def load_provider_icon(provider: str, max_size: int) -> Any | None:
+    icon_path = provider_image_path(provider)
+    if not icon_path.exists() or Image is None:
+        return None
+
+    if icon_path.suffix.lower() == ".svg":
+        if cairosvg is None:
+            return None
+        png_bytes = cairosvg.svg2png(
+            url=str(icon_path),
+            output_width=max_size,
+            output_height=max_size,
+        )
+        import io
+
+        icon = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    else:
+        icon = Image.open(icon_path).convert("RGBA")
+
+    icon.thumbnail((max_size, max_size))
+    return icon
+def reset_summary(row: sqlite3.Row, window: str) -> str:
+    reset_at, reset_in = reset_parts(row, window)
+    if reset_at == "n/a" and reset_in == "n/a":
+        return "↺ n/a"
+    if reset_at == "n/a":
+        return f"↺ in {reset_in}"
+    if reset_in == "n/a":
+        return f"↺ {reset_at}"
+    return f"↺ {reset_at} / {reset_in}"
 
 PROVIDER_LABELS = {
     "codex": "Codex",
@@ -293,12 +432,8 @@ def status_line(row: sqlite3.Row, window: str) -> str:
 
     pct = clamp_percentage(used)
     pct_text = "n/a" if pct is None else f"{pct:.0f}%"
-    reset_at, reset_in = reset_parts(row, window)
     provider = USAGE_NOTIFY_LABELS.get(provider_name.lower(), provider_name.capitalize())
-    line = f"{provider:<7} {usage_dot_bar(used, width=8)} {pct_text:>4}"
-    if reset_at != "n/a":
-        line += f" · ↺ {reset_at}"
-    return line
+    return f"{provider:<7} {usage_dot_bar(used, width=8)} {pct_text:>4} · {reset_summary(row, window)}"
 
 
 def read_forecast_rows(provider: str | None = None) -> list[sqlite3.Row]:
@@ -405,52 +540,6 @@ def usage_detail_lines(details: list[tuple[str, str]]) -> list[str]:
     return [f"{label + ':':<{label_width + 1}} {value}" for label, value in details]
 
 
-def build_usage_change_message(provider: str, used_pct: float, reset_at: Any) -> str:
-    return "\n".join(
-        [
-            f"{usage_notify_label(provider)} 5-hour usage changed",
-            "",
-            *usage_detail_lines(
-                [
-                    ("Used", f"{used_pct:.0f}%"),
-                    ("Next reset", fmt_datetime(reset_at)),
-                ]
-            ),
-        ]
-    )
-
-
-def build_usage_warning_message(provider: str, used_pct: float, reset_at: Any) -> str:
-    return "\n".join(
-        [
-            f"⚠️ {usage_notify_label(provider)} usage is depleted",
-            "",
-            *usage_detail_lines(
-                [
-                    ("Used", f"{used_pct:.0f}%"),
-                    ("Next reset", fmt_datetime(reset_at)),
-                ]
-            ),
-        ]
-    )
-
-
-def build_usage_available_message(provider: str, reset_at: Any) -> str:
-    banner = "🟩🟩🟩 AVAILABLE 🟩🟩🟩"
-    return "\n".join(
-        [
-            banner,
-            f"✅ {provider_label(provider)} is available again",
-            banner,
-            "",
-            "5-hour usage has reset to 0%.",
-            *usage_detail_lines(
-                [
-                    ("Reset time", fmt_datetime(reset_at)),
-                ]
-            ),
-        ]
-    )
 
 
 def notify_for_usage_row(
@@ -473,31 +562,31 @@ def notify_for_usage_row(
     previous_used = provider_state.get("five_hour_used_pct")
     previous_warning_sent = bool(provider_state.get("five_hour_warning_sent"))
 
-    message: str | None = None
+    should_send = False
 
     if rounded_used == 0:
         if previous_used is not None and float(previous_used) > 0:
-            message = build_usage_available_message(provider, reset_at)
+            should_send = True
         provider_state["five_hour_warning_sent"] = False
     elif rounded_used >= USAGE_WARNING_THRESHOLD_PCT and not previous_warning_sent:
-        message = build_usage_warning_message(provider, float(rounded_used), reset_at)
+        should_send = True
         provider_state["five_hour_warning_sent"] = True
     elif previous_used is not None and rounded_used != round(float(previous_used)):
-        message = build_usage_change_message(provider, float(rounded_used), reset_at)
+        should_send = True
         if rounded_used < USAGE_WARNING_THRESHOLD_PCT:
             provider_state["five_hour_warning_sent"] = False
     elif previous_used is None:
-        message = build_usage_change_message(provider, float(rounded_used), reset_at)
+        should_send = True
         provider_state["five_hour_warning_sent"] = rounded_used >= USAGE_WARNING_THRESHOLD_PCT
 
     provider_state["five_hour_used_pct"] = float(rounded_used)
     provider_state["five_hour_reset_at"] = reset_at
     provider_state["observed_at"] = row["observed_at"]
 
-    if message is None:
+    if not should_send:
         return False
 
-    send_message(token, chat_id, message)
+    send_provider_status(token, chat_id, row)
     provider_state["last_sent_at"] = datetime.now(timezone.utc).isoformat()
     return True
 
@@ -515,16 +604,6 @@ def run_notify() -> None:
     print(f"Usage notifications sent: {sent}")
 
 
-def build_reset_message(provider: str, window_label: str, reset_at: str) -> str:
-    return "\n".join(
-        [
-            f"✅ {provider_label(provider)} {window_label} limit has reset",
-            "",
-            "You can start using it again.",
-            f"Reset time: {fmt_datetime(reset_at)}",
-            "",
-        ]
-    )
 
 
 def run_reset_notify() -> None:
@@ -552,7 +631,7 @@ def run_reset_notify() -> None:
                 continue
 
             if now >= reset_dt:
-                send_message(token, chat_id, build_reset_message(provider, window_label, reset_at))
+                send_provider_status(token, chat_id, row)
                 state[key] = {"sent_at": now.isoformat(), "reset_at": reset_at}
                 sent += 1
             else:
@@ -562,6 +641,222 @@ def run_reset_notify() -> None:
 
     print(f"Reset notifications sent: {sent}")
     print(f"Known future resets pending: {pending}")
+def card_font(size: int, *, bold: bool = False) -> Any:
+    if ImageFont is None:
+        return None
+
+    candidates = [
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial Bold.ttf" if bold else "/Library/Fonts/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return ImageFont.truetype(candidate, size=size)
+    return ImageFont.load_default()
+
+
+def dot_fill_count(used_pct: Any, width: int = 8) -> int:
+    pct = clamp_percentage(used_pct)
+    if pct is None or pct <= 0:
+        return 0
+    if pct >= 100:
+        return width
+    return max(1, min(width - 1, round((pct / 100.0) * width)))
+
+
+def usage_rgb(used_pct: Any) -> tuple[int, int, int]:
+    pct = clamp_percentage(used_pct)
+    if pct is None:
+        return (145, 151, 160)
+    if pct >= USAGE_WARNING_THRESHOLD_PCT:
+        return (245, 58, 72)
+    if pct >= 70:
+        return (255, 132, 67)
+    if pct >= 30:
+        return (252, 190, 62)
+    return (67, 201, 92)
+
+
+def draw_usage_dots(
+    draw: Any,
+    x: int,
+    y: int,
+    used_pct: Any,
+    *,
+    width: int = 8,
+    radius: int = 18,
+    gap: int = 12,
+) -> None:
+    filled = dot_fill_count(used_pct, width)
+    active = usage_rgb(used_pct)
+    inactive = (145, 151, 160)
+    for index in range(width):
+        cx = x + index * ((radius * 2) + gap)
+        color = active if index < filled else inactive
+        draw.ellipse((cx, y, cx + radius * 2, y + radius * 2), fill=color)
+
+
+def reset_text_parts(row: sqlite3.Row, window: str) -> tuple[str, str]:
+    reset_at, reset_in = reset_parts(row, window)
+    reset_in_text = "n/a" if reset_in == "n/a" else reset_in
+    reset_at_text = reset_at
+    return reset_in_text, reset_at_text
+
+
+def provider_card_image_path(row: sqlite3.Row) -> Path | None:
+    if Image is None or ImageDraw is None or ImageFont is None:
+        return None
+
+    TELEGRAM_RESIZED_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+
+    provider = str(row["provider"]).lower()
+    output_path = TELEGRAM_RESIZED_ASSETS_DIR / f"{provider}-status-card.png"
+
+    observed_dt = parse_dt(row["observed_at"])
+    observed_time = (
+        observed_dt.astimezone(LOCAL_TIMEZONE).strftime("%H:%M")
+        if observed_dt is not None
+        else "--:--"
+    )
+
+    five_hour_used = row["five_hour_used_pct"]
+    weekly_used = row["weekly_used_pct"]
+    five_hour_pct = clamp_percentage(five_hour_used)
+    weekly_pct = clamp_percentage(weekly_used)
+    five_hour_pct_text = "n/a" if five_hour_pct is None else f"{five_hour_pct:.0f}%"
+    weekly_pct_text = "n/a" if weekly_pct is None else f"{weekly_pct:.0f}%"
+    five_reset_in, five_reset_at = reset_text_parts(row, "five_hour")
+    weekly_reset_in, weekly_reset_at = reset_text_parts(row, "weekly")
+
+    bg = (25, 31, 39)
+    panel = (34, 42, 53)
+    text = (242, 245, 248)
+    muted = (177, 184, 194)
+    line = (61, 72, 86)
+    accent = usage_rgb(five_hour_used)
+
+    image = Image.new("RGB", (TELEGRAM_CARD_WIDTH, TELEGRAM_CARD_HEIGHT), bg)
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle(
+        (18, 18, TELEGRAM_CARD_WIDTH - 18, TELEGRAM_CARD_HEIGHT - 18),
+        radius=34,
+        fill=panel,
+    )
+
+    title_font = card_font(42, bold=True)
+    label_font = card_font(24, bold=True)
+    small_font = card_font(22)
+    pct_font = card_font(34, bold=True)
+    reset_font = card_font(24)
+
+    icon_x = 48
+    icon_y = 55
+    draw.rounded_rectangle(
+        (icon_x, icon_y, icon_x + TELEGRAM_CARD_ICON_SIZE, icon_y + TELEGRAM_CARD_ICON_SIZE),
+        radius=22,
+        fill=(244, 246, 249),
+    )
+    icon = load_provider_icon(provider, TELEGRAM_CARD_ICON_SIZE - 22)
+    if icon is not None:
+        paste_x = icon_x + (TELEGRAM_CARD_ICON_SIZE - icon.width) // 2
+        paste_y = icon_y + (TELEGRAM_CARD_ICON_SIZE - icon.height) // 2
+        image.paste(icon, (paste_x, paste_y), icon)
+
+    provider_title = PROVIDER_LABELS.get(provider, provider.capitalize())
+    draw.text((196, 70), provider_title, font=title_font, fill=text)
+    draw.text((196, 132), f"◷ Last updated: {observed_time}", font=small_font, fill=muted)
+
+    left_split = 390
+    draw.line((left_split, 42, left_split, TELEGRAM_CARD_HEIGHT - 42), fill=line, width=2)
+
+    row1_y = 78
+    row2_y = 188
+    label_x = 430
+    dots_x = 635
+    pct_x = 1048
+    reset_x = 1172
+
+    draw.text((label_x, row1_y), "⚡  5h usage", font=label_font, fill=text)
+    draw_usage_dots(draw, dots_x, row1_y - 1, five_hour_used, width=8, radius=15, gap=13)
+    draw.text((pct_x, row1_y - 5), five_hour_pct_text, font=pct_font, fill=usage_rgb(five_hour_used))
+    draw.line((1138, row1_y - 14, 1138, row1_y + 50), fill=line, width=2)
+    draw.text((reset_x, row1_y - 5), f"↺ {five_reset_at} / {five_reset_in}", font=reset_font, fill=accent)
+
+    draw.line((label_x, 158, TELEGRAM_CARD_WIDTH - 58, 158), fill=line, width=2)
+
+    draw.text((label_x, row2_y), "📅  Weekly usage", font=label_font, fill=text)
+    draw_usage_dots(draw, dots_x, row2_y - 1, weekly_used, width=8, radius=15, gap=13)
+    draw.text((pct_x, row2_y - 5), weekly_pct_text, font=pct_font, fill=usage_rgb(weekly_used))
+    draw.line((1138, row2_y - 14, 1138, row2_y + 50), fill=line, width=2)
+    draw.text((reset_x, row2_y - 5), f"↺ {weekly_reset_at} / {weekly_reset_in}", font=reset_font, fill=usage_rgb(weekly_used))
+
+    image.save(output_path, "PNG")
+    return output_path
+
+
+def build_provider_card(row: sqlite3.Row) -> str:
+    observed_dt = parse_dt(row["observed_at"])
+    observed_time = (
+        observed_dt.astimezone(LOCAL_TIMEZONE).strftime("%H:%M")
+        if observed_dt is not None
+        else "--:--"
+    )
+
+    five_hour_used = row["five_hour_used_pct"]
+    weekly_used = row["weekly_used_pct"]
+    five_hour_pct = clamp_percentage(five_hour_used)
+    weekly_pct = clamp_percentage(weekly_used)
+    five_hour_pct_text = "n/a" if five_hour_pct is None else f"{five_hour_pct:.0f}%"
+    weekly_pct_text = "n/a" if weekly_pct is None else f"{weekly_pct:.0f}%"
+
+    lines = [
+        f"🕒 Last updated: {observed_time}",
+        "",
+        f"⚡ 5h usage     {usage_dot_bar(five_hour_used, width=8)} {five_hour_pct_text:>4} · {reset_summary(row, 'five_hour')}",
+        f"📅 Weekly usage {usage_dot_bar(weekly_used, width=8)} {weekly_pct_text:>4} · {reset_summary(row, 'weekly')}",
+    ]
+    return "<pre>" + escape("\n".join(lines).strip()) + "</pre>"
+
+
+def send_provider_status(token: str, chat_id: str | int, row: sqlite3.Row) -> None:
+    card_path = provider_card_image_path(row)
+    if card_path is not None and card_path.exists():
+        send_photo_message(token, chat_id, card_path, "")
+        return
+
+    provider = str(row["provider"]).lower()
+    caption = build_provider_card(row)
+    send_photo_message(
+        token,
+        chat_id,
+        provider_image_path(provider),
+        caption,
+        parse_mode="HTML",
+    )
+
+# New: send_status_cards
+def send_status_cards(
+    token: str,
+    chat_id: str | int,
+    provider: str | None = None,
+    refresh_note: str | None = None,
+) -> None:
+    rows = read_forecast_rows(provider)
+    if not rows:
+        send_message(
+            token,
+            chat_id,
+            "No forecast data found. Run <code>ai-tokens sync</code> first.",
+            parse_mode="HTML",
+        )
+        return
+
+    if refresh_note:
+        send_message(token, chat_id, refresh_note, parse_mode="HTML")
+
+    for row in rows:
+        send_provider_status(token, chat_id, row)
 
 
 def refresh_usage_before_status() -> tuple[bool, str]:
@@ -681,22 +976,29 @@ def help_text() -> str:
     )
 
 
-def handle_command(text: str) -> str:
+def handle_command(token: str, chat_id: str | int, text: str) -> None:
     cmd = text.strip().split()[0].lower()
 
     if cmd in {"/start", "/help"}:
-        return help_text()
+        send_message(token, chat_id, help_text(), parse_mode="HTML")
+        return
+
     if cmd in {"/status", "/forecast"}:
         ok, note = refresh_usage_before_status()
-        return build_status(refresh_note=freshness_note(ok, note))
+        send_status_cards(token, chat_id, refresh_note=freshness_note(ok, note))
+        return
+
     if cmd == "/codex":
         ok, note = refresh_usage_before_status()
-        return build_status("codex", refresh_note=freshness_note(ok, note))
+        send_status_cards(token, chat_id, "codex", refresh_note=freshness_note(ok, note))
+        return
+
     if cmd == "/claude":
         ok, note = refresh_usage_before_status()
-        return build_status("claude", refresh_note=freshness_note(ok, note))
+        send_status_cards(token, chat_id, "claude", refresh_note=freshness_note(ok, note))
+        return
 
-    return "Unknown command. Send <code>/help</code>."
+    send_message(token, chat_id, "Unknown command. Send <code>/help</code>.", parse_mode="HTML")
 
 
 def run_bot() -> None:
@@ -740,7 +1042,7 @@ def run_bot() -> None:
             if not text:
                 continue
 
-            send_message(token, chat_id, handle_command(text), parse_mode="HTML")
+            handle_command(token, chat_id, text)
 
         time.sleep(1)
 
