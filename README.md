@@ -180,7 +180,7 @@ Codex does not currently expose locally:
 
 ### Browser Usage Pages
 
-The tracker reads authenticated browser usage pages through a local Playwright scraper.
+The tracker reads authenticated browser usage pages through a local Playwright scraper attached to an already running Chrome instance over DevTools.
 
 Current target pages:
 
@@ -198,7 +198,13 @@ These pages are used to capture vendor-reported quota percentages such as:
 
 The browser usage extraction is best-effort and depends on page text remaining parseable.
 
-The scraper uses a persistent browser profile under `~/.ai-token-tracker/browser-profile` and can run headless on Ubuntu. If the browser needs a first-time login, run the scraper once interactively and complete sign-in in the opened browser window.
+The browser must be started with remote debugging enabled, for example:
+
+```bash
+google-chrome --remote-debugging-port=9222
+```
+
+The scraper connects to that browser, reads the logged-in Codex and Claude tabs, and writes dumps without opening new pages. Set `AI_TOKENS_CHROME_CDP_URL` if you expose the DevTools endpoint on a different port or host.
 
 ## Local Database
 
@@ -385,7 +391,7 @@ Logs:
 journalctl --user -u ai-token-tracker-telegram.service -f
 ```
 
-The service runs the interactive bot, performs `ai-tokens sync` on its polling cycle, and sends notifications from the refreshed local database. Browser refresh hooks remain optional and are only enabled when the host supports them.
+The service runs the interactive bot, performs `ai-tokens sync` on its polling cycle, and sends notifications from the refreshed local database. The browser scraper reads the already-open Chrome tabs through DevTools, so Chrome must be started with remote debugging enabled before the service runs.
 To keep the service alive after logout or reboot, enable lingering with `sudo loginctl enable-linger <user>`.
 
 ### macOS Sync / Forecast / Notifications

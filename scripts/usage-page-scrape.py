@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
-"""Scrape authenticated browser usage pages into local dump files.
+"""Scrape authenticated browser usage pages from an already running Chrome.
 
-This is the Linux-capable replacement for the old AppleScript-based browser
-pipeline. It uses Playwright to open the authenticated pages, reads the visible
-body text, and writes the result to usage-dumps/*.txt for the existing parser.
+This attaches to a Chrome/Chromium instance through the DevTools protocol and
+reads the existing logged-in tabs. It does not open new pages.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable, Any
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 DUMP_DIR = PROJECT_DIR / "usage-dumps"
-PROFILE_DIR = Path(os.environ.get("AI_TOKENS_BROWSER_PROFILE_DIR", Path.home() / ".ai-token-tracker" / "browser-profile"))
-HEADLESS_ENV = os.environ.get("AI_TOKENS_BROWSER_HEADLESS")
+CHROME_CDP_URL = os.environ.get("AI_TOKENS_CHROME_CDP_URL", "http://127.0.0.1:9222")
 
-PAGES = {
-    "codex": "https://chatgpt.com/codex/cloud/settings/analytics",
-    "claude": "https://claude.ai/settings/usage",
+TARGETS = {
+    "codex": "chatgpt.com/codex/cloud/settings/analytics",
+    "claude": "claude.ai/settings/usage",
 }
 
 PAGE_MARKERS = {
@@ -35,26 +33,6 @@ PAGE_MARKERS = {
 
 def dump_path_for(name: str) -> Path:
     return DUMP_DIR / f"{name.capitalize()}.txt"
-
-
-def resolve_headless() -> bool:
-    if HEADLESS_ENV is not None:
-        return HEADLESS_ENV.strip().lower() not in {"0", "false", "no", "off"}
-    return not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-
-
-def detect_executable_path() -> str | None:
-    for candidate in (
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium",
-        "chromium-browser",
-        "chrome",
-    ):
-        path = shutil.which(candidate)
-        if path:
-            return path
-    return None
 
 
 def write_dump(name: str, url: str, text: str) -> Path:
@@ -77,10 +55,28 @@ def write_dump(name: str, url: str, text: str) -> Path:
     return output
 
 
-def scrape_page(page, name: str, url: str) -> Path:
+def normalize_url(url: str) -> str:
+    return url.lower().strip()
+
+
+def page_matches(name: str, url: str) -> bool:
+    return TARGETS[name] in normalize_url(url)
+
+
+def iter_existing_pages(browser) -> Iterable[tuple[str, Any]]:
+    for context in browser.contexts:
+        for page in context.pages:
+            url = getattr(page, "url", "")
+            if not url:
+                continue
+            for name in TARGETS:
+                if page_matches(name, url):
+                    yield name, page
+
+
+def scrape_page(name: str, page) -> Path:
+    url = page.url
     print(f"Scraping {name}: {url}", flush=True)
-    page.goto(url, wait_until="networkidle", timeout=60000)
-    page.wait_for_timeout(3000)
 
     try:
         text = page.locator("body").inner_text(timeout=30000)
@@ -89,7 +85,7 @@ def scrape_page(page, name: str, url: str) -> Path:
 
     lowered = text.lower()
     if "log in" in lowered or "sign in" in lowered or "continue with google" in lowered:
-        print(f"{name}: login page detected; dump still written for inspection.", flush=True)
+        print(f"{name}: login page detected in existing tab; dump still written for inspection.", flush=True)
 
     dump_file = write_dump(name, url, text)
     print(f"{name}: wrote {dump_file}", flush=True)
@@ -102,36 +98,43 @@ def main() -> None:
     if provider not in {"all", "codex", "claude"}:
         raise SystemExit("Usage: scripts/usage-page-scrape.py [all|codex|claude]")
 
-    targets = PAGES.items() if provider == "all" else [(provider, PAGES[provider])]
-
-    executable_path = detect_executable_path()
-    if executable_path is None:
-        print(
-            "No Chrome/Chromium binary found on PATH. Install Google Chrome or Chromium, "
-            "or provide a Playwright browser with `python -m playwright install chromium`.",
-            file=sys.stderr,
-        )
-
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    wanted = {provider} if provider in TARGETS else set(TARGETS)
 
     with sync_playwright() as p:
-        launch_kwargs = {
-            "headless": resolve_headless(),
-            "viewport": {"width": 1440, "height": 1000},
-        }
-        if executable_path is not None:
-            launch_kwargs["executable_path"] = executable_path
-
-        browser = p.chromium.launch_persistent_context(str(PROFILE_DIR), **launch_kwargs)
         try:
-            page = browser.new_page()
-            for name, url in targets:
-                try:
-                    scrape_page(page, name, url)
-                except Exception as exc:
-                    print(f"{name}: failed: {exc}", file=sys.stderr)
+            browser = p.chromium.connect_over_cdp(CHROME_CDP_URL)
+        except Exception as exc:
+            raise SystemExit(
+                "Could not connect to Chrome via DevTools at "
+                f"{CHROME_CDP_URL}. Start Chrome with "
+                "'--remote-debugging-port=9222 --user-data-dir=<your profile>' "
+                "so this script can read the existing logged-in tabs."
+            ) from exc
+
+        try:
+            seen: set[int] = set()
+            found = 0
+
+            for name, page in iter_existing_pages(browser):
+                if name not in wanted:
+                    continue
+
+                page_id = id(page)
+                if page_id in seen:
+                    continue
+
+                seen.add(page_id)
+                scrape_page(name, page)
+                found += 1
+
+            if found == 0:
+                raise SystemExit(
+                    "No matching existing Chrome tabs were found. "
+                    f"Looked for {', '.join(sorted(wanted))} in tabs from {CHROME_CDP_URL}.\n"
+                    "Open the target pages in the already running Chrome profile, then rerun."
+                )
         finally:
-            browser.close()
+            pass
 
     print("Done.")
 

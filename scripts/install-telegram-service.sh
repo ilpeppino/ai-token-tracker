@@ -20,6 +20,7 @@ ExecStart=$BASE/.venv/bin/python $BASE/scripts/telegram.py service
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+Environment=AI_TOKENS_CHROME_CDP_URL=http://127.0.0.1:9222
 Environment=AI_TOKENS_TELEGRAM_REFRESH_COMMAND=
 Environment=AI_TOKENS_TELEGRAM_SYNC_COMMAND=
 EnvironmentFile=-$BASE/.env
