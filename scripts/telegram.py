@@ -46,7 +46,7 @@ TELEGRAM_CARD_RENDER_ERROR = (
 )
 
 STATUS_REFRESH_TIMEOUT_SECONDS = 90
-POLL_INTERVAL_SECONDS = 5 * 60
+POLL_INTERVAL_SECONDS = 15 * 60
 USAGE_WARNING_THRESHOLD_PCT = 90.0
 TELEGRAM_LONG_POLL_TIMEOUT_SECONDS = 25
 TELEGRAM_HTTP_TIMEOUT_BUFFER_SECONDS = 10
@@ -953,7 +953,7 @@ def usage() -> str:
             "",
             "Commands:",
             "  notify        Send usage-change notifications once.",
-            "  poll-notify   Check usage-change notifications every 5 minutes.",
+            "  poll-notify   Check usage-change notifications every 15 minutes.",
             "  reset-notify  Send reset notifications once.",
             "  bot           Run the interactive Telegram bot.",
             "  telegram      Run the interactive bot and usage polling together.",
