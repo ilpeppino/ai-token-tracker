@@ -8,6 +8,7 @@ cd "$BASE"
 python3 -m venv .venv
 "$BASE/.venv/bin/pip" install --upgrade pip
 "$BASE/.venv/bin/pip" install -r requirements.txt
+"$BASE/.venv/bin/python" -m playwright install chromium
 
 mkdir -p "$HOME/.local/bin"
 

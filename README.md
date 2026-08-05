@@ -1,6 +1,6 @@
 # AI Token Tracker
 
-Local Mac dashboard for tracking AI coding-agent usage across Claude Code and Codex CLI.
+Local dashboard for tracking AI coding-agent usage across Claude Code and Codex CLI.
 
 The project normalizes local usage into a practical measurement unit called **Toktok**. Toktok does **not** claim to be an official vendor token. It is a local, empirical usage unit used to compare agentic AI consumption across tools and correlate that usage with vendor-reported quota percentages.
 
@@ -19,7 +19,7 @@ The project normalizes local usage into a practical measurement unit called **To
 Project folder:
 
 ```text
-/Volumes/DevSSD/projects/ai-token-tracker
+<repo clone path>
 ```
 
 Compatibility symlink:
@@ -33,6 +33,8 @@ Compatibility symlink:
 ```text
 ai-tokens          Main command dispatcher.
 install.sh        Local installer for the command and virtual environment.
+scripts/install-telegram-service.sh  Installs the Ubuntu user service for Telegram.
+scripts/usage-page-scrape.py  Playwright scraper for authenticated browser usage pages.
 run.sh            Compatibility wrapper for dashboard startup.
 sync.sh           Compatibility wrapper for local usage sync.
 export.sh         Compatibility wrapper for export.
@@ -98,6 +100,12 @@ Run the interactive bot with background usage polling every 5 minutes:
 ai-tokens telegram
 ```
 
+Run the Telegram service alias:
+
+```bash
+ai-tokens service
+```
+
 Export CSV/JSON backup:
 
 ```bash
@@ -119,11 +127,13 @@ Direct local scripts:
 ./export.sh
 ./scripts/sync-usage.py
 ./scripts/sync-usage-percentages.py
+./scripts/usage-page-scrape.py all
 ./scripts/telegram.py notify
 ./scripts/telegram.py poll-notify
 ./scripts/telegram.py reset-notify
 ./scripts/telegram.py bot
 ./scripts/telegram.py telegram
+./scripts/install-telegram-service.sh
 ```
 
 ## Data Sources
@@ -170,7 +180,7 @@ Codex does not currently expose locally:
 
 ### Browser Usage Pages
 
-The tracker can read already-open authenticated Chrome tabs using AppleScript and JavaScript-from-Apple-Events.
+The tracker reads authenticated browser usage pages through a local Playwright scraper attached to an already running Chrome instance over DevTools.
 
 Current target pages:
 
@@ -188,7 +198,13 @@ These pages are used to capture vendor-reported quota percentages such as:
 
 The browser usage extraction is best-effort and depends on page text remaining parseable.
 
-The tracker can automatically refresh the already-open Codex/Claude usage dashboard tabs before scraping, allowing background polling without manually reloading the pages.
+The browser must be started with remote debugging enabled, for example:
+
+```bash
+google-chrome --remote-debugging-port=9222
+```
+
+The scraper connects to that browser, reads the logged-in Codex and Claude tabs, and writes dumps without opening new pages. Set `AI_TOKENS_CHROME_CDP_URL` if you expose the DevTools endpoint on a different port or host.
 
 ## Local Database
 
@@ -201,7 +217,7 @@ Main SQLite database:
 Actual path, via symlink:
 
 ```text
-/Volumes/DevSSD/projects/ai-token-tracker/usage.sqlite
+<repo clone path>/usage.sqlite
 ```
 
 Primary usage table:
@@ -361,9 +377,26 @@ ai-tokens export
 
 ## Background Automation
 
-The project can run fully automated on macOS using LaunchAgents.
+### Ubuntu Telegram Service
 
-### Sync / Forecast / Notifications
+On Ubuntu, the Telegram bot runs as a `systemd --user` service:
+
+```bash
+./scripts/install-telegram-service.sh
+```
+
+Logs:
+
+```bash
+journalctl --user -u ai-token-tracker-telegram.service -f
+```
+
+The service runs the interactive bot, performs `ai-tokens sync` on its polling cycle, and sends notifications from the refreshed local database. The browser scraper reads the already-open Chrome tabs through DevTools, so Chrome must be started with remote debugging enabled before the service runs.
+To keep the service alive after logout or reboot, enable lingering with `sudo loginctl enable-linger <user>`.
+
+### macOS Sync / Forecast / Notifications
+
+The project can also run fully automated on macOS using LaunchAgents.
 
 Runs every 10 minutes:
 

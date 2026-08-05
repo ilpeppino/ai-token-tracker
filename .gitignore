@@ -10,3 +10,5 @@ browser-profile/
 .telegram-bot-state.json
 .DS_Store
 .aider*
+Profile
+.telegram-assets/

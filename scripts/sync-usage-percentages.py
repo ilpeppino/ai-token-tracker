@@ -381,7 +381,9 @@ def parse_claude(text: str, observed_at: datetime) -> ParsedUsageSnapshot:
 
 
 def detect_provider(text: str) -> Provider | None:
-    low = text.lower()
+    # Strip header comment lines so we don't match the "# marker=Plan Usage Limits" comment.
+    body_lines = [line for line in text.splitlines() if not line.startswith("#")]
+    low = "\n".join(body_lines).lower()
 
     if "codex analytics" in low or ("5 hour usage limit" in low and "weekly usage limit" in low):
         return "codex"

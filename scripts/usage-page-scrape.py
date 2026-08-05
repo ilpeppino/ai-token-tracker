@@ -1,104 +1,159 @@
 #!/usr/bin/env python3
-import re
+"""Scrape authenticated browser usage pages from an already running Chrome.
+
+This attaches to a Chrome/Chromium instance through the DevTools protocol and
+reads the existing logged-in tabs. It does not open new pages.
+"""
+
+from __future__ import annotations
+
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable, Any
+
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-BASE = Path.home() / ".ai-token-tracker"
-PROFILE_DIR = str(BASE / "browser-profile")
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+DUMP_DIR = PROJECT_DIR / "usage-dumps"
+CHROME_CDP_URL = os.environ.get("AI_TOKENS_CHROME_CDP_URL", "http://127.0.0.1:9222")
 
-PAGES = {
-    "codex": "https://chatgpt.com/codex/cloud/settings/analytics",
-    "claude": "https://claude.ai/settings/usage",
+TARGETS = {
+    "codex": ["chatgpt.com/codex/cloud/settings/analytics"],
+    "claude": ["claude.ai/settings/usage", "claude.ai/new#settings/usage"],
 }
 
-def extract_percentages(text: str):
-    matches = re.findall(r"(\d{1,3}(?:\.\d+)?)\s*%", text)
-    values = []
-    for m in matches:
-        try:
-            v = float(m)
-            if 0 <= v <= 100:
-                values.append(v)
-        except ValueError:
-            pass
-    return values
+PAGE_MARKERS = {
+    "codex": "Codex Analytics",
+    "claude": "Plan Usage Limits",
+}
 
-def guess_usage_labels(text: str):
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    interesting = []
+# Strings that must appear in the page body for the dump to be considered valid.
+CONTENT_CHECKS = {
+    "codex": ["codex analytics"],
+    "claude": ["plan usage limits"],
+}
 
-    for i, line in enumerate(lines):
-        low = line.lower()
-        if "%" in line or "5-hour" in low or "5 hour" in low or "weekly" in low or "week" in low or "usage" in low or "limit" in low:
-            context = lines[max(0, i - 2): min(len(lines), i + 3)]
-            interesting.append(" | ".join(context))
 
-    return interesting[:30]
+def dump_path_for(name: str) -> Path:
+    return DUMP_DIR / f"{name.capitalize()}.txt"
 
-def scrape(page, name, url):
-    print(f"\n=== {name.upper()} ===")
-    print(f"URL: {url}")
 
-    page.goto(url, wait_until="networkidle", timeout=60000)
-    page.wait_for_timeout(3000)
+def write_dump(name: str, url: str, text: str) -> Path:
+    DUMP_DIR.mkdir(parents=True, exist_ok=True)
+    observed_at = datetime.now(timezone.utc).isoformat()
+    output = dump_path_for(name)
+    output.write_text(
+        "\n".join(
+            [
+                f"# provider={name}",
+                f"# marker={PAGE_MARKERS[name]}",
+                f"# url={url}",
+                f"# observed_at={observed_at}",
+                "",
+                text.strip(),
+                "",
+            ]
+        )
+    )
+    return output
 
-    text = page.locator("body").inner_text(timeout=30000)
 
-    if "log in" in text.lower() or "sign in" in text.lower():
-        print("Looks like you may need to log in in the opened browser window.")
-        print("After logging in, rerun this script.")
-        return
+def normalize_url(url: str) -> str:
+    return url.lower().strip()
 
-    percentages = extract_percentages(text)
 
-    print("\nPercentages found:")
-    if percentages:
-        for p in percentages:
-            print(f"  {p:g}%")
-    else:
-        print("  none found")
+def page_matches(name: str, url: str) -> bool:
+    normalized = normalize_url(url)
+    return any(pattern in normalized for pattern in TARGETS[name])
 
-    print("\nRelevant text snippets:")
-    snippets = guess_usage_labels(text)
-    if snippets:
-        for s in snippets:
-            print(f"  - {s[:500]}")
-    else:
-        print("  no obvious usage snippets found")
 
-def main():
+def iter_existing_pages(browser) -> Iterable[tuple[str, Any]]:
+    for context in browser.contexts:
+        for page in context.pages:
+            url = getattr(page, "url", "")
+            if not url:
+                continue
+            for name in TARGETS:
+                if page_matches(name, url):
+                    yield name, page
+
+
+def scrape_page(name: str, page) -> Path:
+    url = page.url
+    print(f"Scraping {name}: {url}", flush=True)
+
+    try:
+        text = page.locator("body").inner_text(timeout=30000)
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError(f"{name}: failed to read page text: {exc}") from exc
+
+    lowered = text.lower()
+    if "log in" in lowered or "sign in" in lowered or "continue with google" in lowered:
+        print(f"WARNING {name}: login page detected — tab may not be authenticated.", flush=True)
+
+    for check in CONTENT_CHECKS[name]:
+        if check not in lowered:
+            print(
+                f"WARNING {name}: expected content '{check}' not found in page body. "
+                f"Tab may have navigated away or shows wrong content.",
+                flush=True,
+            )
+            break
+
+    dump_file = write_dump(name, url, text)
+    print(f"{name}: wrote {dump_file}", flush=True)
+    return dump_file
+
+
+def main() -> None:
     provider = sys.argv[1].lower() if len(sys.argv) > 1 else "all"
 
+    if provider not in {"all", "codex", "claude"}:
+        raise SystemExit("Usage: scripts/usage-page-scrape.py [all|codex|claude]")
+
+    wanted = {provider} if provider in TARGETS else set(TARGETS)
+
     with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            PROFILE_DIR,
-            headless=False,
-            viewport={"width": 1440, "height": 1000},
-        )
+        try:
+            browser = p.chromium.connect_over_cdp(CHROME_CDP_URL)
+        except Exception as exc:
+            raise SystemExit(
+                "Could not connect to Chrome via DevTools at "
+                f"{CHROME_CDP_URL}. Start Chrome with "
+                "'--remote-debugging-port=9222 --user-data-dir=<your profile>' "
+                "so this script can read the existing logged-in tabs."
+            ) from exc
 
-        page = browser.new_page()
+        try:
+            seen: set[int] = set()
+            found = 0
 
-        if provider == "all":
-            targets = PAGES.items()
-        elif provider in PAGES:
-            targets = [(provider, PAGES[provider])]
-        else:
-            print("Usage: scripts/usage-page-scrape.py [all|codex|claude]")
-            browser.close()
-            sys.exit(1)
+            for name, page in iter_existing_pages(browser):
+                if name not in wanted:
+                    continue
 
-        for name, url in targets:
-            try:
-                scrape(page, name, url)
-            except Exception as e:
-                print(f"\n{name}: failed: {e}")
+                page_id = id(page)
+                if page_id in seen:
+                    continue
 
-        print("\nDone.")
-        print("If login was required, complete login in the opened browser, then rerun:")
-        print("  python scripts/usage-page-scrape.py all")
+                seen.add(page_id)
+                scrape_page(name, page)
+                found += 1
 
-        browser.close()
+            if found == 0:
+                raise SystemExit(
+                    "No matching existing Chrome tabs were found. "
+                    f"Looked for {', '.join(sorted(wanted))} in tabs from {CHROME_CDP_URL}.\n"
+                    "Open the target pages in the already running Chrome profile, then rerun."
+                )
+        finally:
+            pass
+
+    print("Done.")
+
 
 if __name__ == "__main__":
     main()
